@@ -1,0 +1,74 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build universal binary
+        run: VERSION="${TAG#v}" ./scripts/release.sh
+
+      - name: Smoke test
+        run: |
+          got="$(dist/appsassin version)"
+          echo "$got"
+          test "$got" = "appsassin ${TAG#v}"
+          lipo -archs dist/appsassin | grep -q arm64
+          lipo -archs dist/appsassin | grep -q x86_64
+
+      - name: Publish release assets
+        run: |
+          assets=(dist/appsassin-macos.tar.gz dist/appsassin-macos.tar.gz.sha256)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Release was drafted by hand: keep its notes, just (re)attach the assets.
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            sed -e "/^<!--.*-->$/d" -e "s|{{TAG}}|$TAG|g" -e "s|{{REPO}}|$GITHUB_REPOSITORY|g" \
+              .github/release-notes.md > "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" "${assets[@]}" --verify-tag \
+              --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+      - name: Bump Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::TAP_TOKEN secret is not set, so mikemich/homebrew-tap was not bumped. Add a fine-grained PAT with Contents: read & write on mikemich/homebrew-tap as the TAP_TOKEN repo secret, then re-run this job."
+            exit 1
+          fi
+          sha="$(cut -d' ' -f1 dist/appsassin-macos.tar.gz.sha256)"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/appsassin-macos.tar.gz"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/mikemich/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          sed -i '' -E \
+            -e "s|^  url \".*\"$|  url \"$url\"|" \
+            -e "s|^  sha256 \".*\"$|  sha256 \"$sha\"|" \
+            Formula/appsassin.rb
+          grep -qF "$url" Formula/appsassin.rb
+          grep -qF "$sha" Formula/appsassin.rb
+          if git diff --quiet; then
+            echo "Formula already points at $TAG"
+            exit 0
+          fi
+          git diff
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "appsassin ${TAG#v}"
+          git push origin HEAD:main

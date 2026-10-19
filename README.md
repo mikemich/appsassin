@@ -20,6 +20,14 @@ You can also let it do this silently in the background.
 
 ## Install
 
+With Homebrew:
+
+```bash
+brew install mikemich/tap/appsassin
+```
+
+Or download the binary directly:
+
 ```bash
 curl -fsSL https://github.com/mikemich/appsassin/releases/latest/download/appsassin-macos.tar.gz | tar xz
 mkdir -p ~/.local/bin && mv appsassin ~/.local/bin/   # anywhere on your PATH
