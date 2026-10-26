@@ -39,6 +39,12 @@ keys y
 sleep 1.3
 gif 2.4
 grab killed && render killed docs/killed.png
+# Graveyard: land on something stealth mode killed and bring it back.
+keys g; gif 1.6
+PAUSE=0.15 keys Down; PAUSE=0.15 keys Down; keys Down; gif 1.4
+grab graveyard && render graveyard docs/graveyard.png
+keys r; gif 2.4
+keys g; gif 1.2
 keys S; gif 2.2
 keys y; gif 1.6
 keys m; gif 2.4

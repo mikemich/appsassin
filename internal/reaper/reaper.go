@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mikemich/appsassin/internal/graveyard"
 	"github.com/mikemich/appsassin/internal/macos"
 	"github.com/mikemich/appsassin/internal/scan"
 )
@@ -15,6 +16,8 @@ type Result struct {
 	Target *scan.Target
 	OK     bool
 	Msg    string
+
+	grave *graveyard.Entry // captured before the kill, buried if it worked
 }
 
 func alive(pid int) bool {
@@ -49,7 +52,20 @@ func signalAll(pids []int, sig syscall.Signal) {
 // Apps get a Cmd-Q style quit request and are left alone if they refuse
 // (unsaved work) unless force is set. Processes get SIGTERM, then SIGKILL
 // after a grace period.
-func Kill(t *scan.Target, force bool) Result {
+//
+// Every successful kill goes to the graveyard, credited to by, so it can be
+// revived later.
+func Kill(t *scan.Target, force bool, by string) Result {
+	r := kill(t, force, by)
+	if r.OK && r.grave != nil {
+		if err := graveyard.Bury(*r.grave); err != nil {
+			r.Msg += " (not recorded in graveyard: " + err.Error() + ")"
+		}
+	}
+	return r
+}
+
+func kill(t *scan.Target, force bool, by string) Result {
 	r := Result{Target: t}
 	if c := scan.Comm(t.PID); c == "" {
 		r.OK, r.Msg = true, "already gone"
@@ -59,6 +75,8 @@ func Kill(t *scan.Target, force bool) Result {
 		return r
 	}
 	tree := append([]int{t.PID}, t.Children...)
+	grave := graveyard.Capture(t, by)
+	r.grave = &grave
 
 	if t.Kind == scan.KindApp && !force {
 		if !macos.Terminate(t.PID) {

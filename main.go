@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mikemich/appsassin/internal/config"
+	"github.com/mikemich/appsassin/internal/graveyard"
 	"github.com/mikemich/appsassin/internal/scan"
 	"github.com/mikemich/appsassin/internal/stealth"
 	"github.com/mikemich/appsassin/internal/tui"
@@ -28,6 +30,10 @@ usage:
                                  print targets and exit
   appsassin sweep [--dry-run] [--apps] [--threshold N]
                                  one unattended kill pass, like stealth mode does
+  appsassin graveyard [-n N] [--json]
+                                 recent kills, newest first (from the TUI, sweep and stealth)
+  appsassin revive <n|name>      bring a kill back: reopen the app, or re-run the
+                                 command in its old directory
   appsassin stealth <cmd>        silent background sweeper
       start [--dry-run]          run detached for this login session
       stop                       stop it
@@ -64,6 +70,10 @@ func main() {
 		err = list(cfg, args)
 	case "sweep":
 		err = sweep(cfg, args)
+	case "graveyard", "graves":
+		err = graveyardCmd(args)
+	case "revive":
+		err = revive(args)
 	case "stealth":
 		err = stealthCmd(args)
 	case "config":
@@ -125,11 +135,84 @@ func sweep(cfg config.Config, args []string) error {
 	logf := func(f string, a ...any) { fmt.Printf(f+"\n", a...) }
 	// A one-off sweep has no watch history of its own, so apps only qualify
 	// when the tracker has actually seen them go unused.
-	rs, err := stealth.Sweep(cfg, scan.LoadTracker(), time.Now(), *apps, *dry, logf)
+	rs, err := stealth.Sweep(cfg, scan.LoadTracker(), time.Now(), *apps, *dry, "sweep", logf)
 	if err == nil && len(rs) == 0 {
 		fmt.Printf("✓ nothing scores ≥%d — all clear\n", *th)
 	}
 	return err
+}
+
+func ago(t time.Time) string { return scan.Human(time.Since(t)) + " ago" }
+
+func graveyardCmd(args []string) error {
+	fs := flag.NewFlagSet("graveyard", flag.ExitOnError)
+	n := fs.Int("n", -1, "entries to show, 0 for all (default 20, or all with --json)")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	_ = fs.Parse(args)
+
+	es, err := graveyard.Load()
+	if err != nil {
+		return err
+	}
+	limit := *n
+	if limit < 0 && !*asJSON {
+		limit = 20
+	}
+	more := 0
+	if limit > 0 && len(es) > limit {
+		more = len(es) - limit
+		es = es[:limit]
+	}
+	if *asJSON {
+		if es == nil {
+			es = []graveyard.Entry{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(es)
+	}
+	if len(es) == 0 {
+		fmt.Println("☠ the graveyard is empty — nothing has been killed yet")
+		return nil
+	}
+	for i, e := range es {
+		mark := " "
+		if e.Revived != nil {
+			mark = "↺"
+		}
+		fmt.Printf("%3d %s %8s  %-7s %-30.30s %-7s %s\n", i+1, mark, ago(e.Killed), e.Kind, e.Name, e.By, e.What())
+	}
+	if more > 0 {
+		fmt.Printf("    … %d older (-n 0 shows all)\n", more)
+	}
+	fmt.Println("\nbring one back: appsassin revive <n|name>")
+	return nil
+}
+
+func revive(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: appsassin revive <n|name> (numbers as in `appsassin graveyard`)")
+	}
+	es, err := graveyard.Load()
+	if err != nil {
+		return err
+	}
+	e, err := graveyard.Find(es, strings.Join(args, " "))
+	if err != nil {
+		return err
+	}
+	rv, err := graveyard.Revive(e)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("↺ revived %s (%s, killed %s by %s)\n  ran: %s\n", e.Name, e.Kind, ago(e.Killed), e.By, rv.Cmd)
+	if rv.PID > 0 {
+		fmt.Printf("  pid: %d\n", rv.PID)
+	}
+	if rv.Log != "" {
+		fmt.Printf("  log: %s\n", rv.Log)
+	}
+	return nil
 }
 
 func stealthCmd(args []string) error {

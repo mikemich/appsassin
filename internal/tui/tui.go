@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/mikemich/appsassin/internal/config"
+	"github.com/mikemich/appsassin/internal/graveyard"
 	"github.com/mikemich/appsassin/internal/reaper"
 	"github.com/mikemich/appsassin/internal/scan"
 	"github.com/mikemich/appsassin/internal/stealth"
@@ -52,6 +53,11 @@ type (
 		on  bool
 		err error
 	}
+	reviveMsg struct {
+		e   graveyard.Entry
+		rv  graveyard.Revival
+		err error
+	}
 	killMsg  []reaper.Result
 	tickMsg  time.Time
 	clearMsg int
@@ -90,6 +96,12 @@ type model struct {
 	kills int
 	freed int64
 
+	graveyard bool // showing the graveyard instead of the hit list
+	graves    []graveyard.Entry
+	gcursor   int
+	goffset   int
+	graveErr  error
+
 	demo bool         // fake data, simulated kills — for screenshots & try-outs
 	gone map[int]bool // demo targets already "killed"
 
@@ -111,6 +123,7 @@ func Run(cfg config.Config, minimal, demo bool) error {
 	}
 	if demo {
 		m.threshold = 30
+		m.graves = graveyard.Demo(time.Now())
 	} else {
 		m.stealthPID, m.stealthOn = stealth.Running()
 	}
@@ -225,6 +238,38 @@ func (m *model) selection() []*scan.Target {
 	return out
 }
 
+// loadGraves re-reads the graveyard, keeping the cursor on the same entry.
+func (m *model) loadGraves() {
+	if m.demo {
+		return
+	}
+	var cur graveyard.Entry
+	if g := m.currentGrave(); g != nil {
+		cur = *g
+	}
+	m.graves, m.graveErr = graveyard.Load()
+	for i, e := range m.graves {
+		if e.PID == cur.PID && e.Killed.Equal(cur.Killed) {
+			m.gcursor = i
+		}
+	}
+	m.gcursor = max(0, min(m.gcursor, len(m.graves)-1))
+}
+
+func (m *model) currentGrave() *graveyard.Entry {
+	if m.gcursor >= 0 && m.gcursor < len(m.graves) {
+		return &m.graves[m.gcursor]
+	}
+	return nil
+}
+
+func reviveCmd(e graveyard.Entry) tea.Cmd {
+	return func() tea.Msg {
+		rv, err := graveyard.Revive(e)
+		return reviveMsg{e: e, rv: rv, err: err}
+	}
+}
+
 func killCmd(ts []*scan.Target, force, demo bool) tea.Cmd {
 	if demo {
 		return func() tea.Msg {
@@ -241,7 +286,7 @@ func killCmd(ts []*scan.Target, force, demo bool) tea.Cmd {
 		var wg sync.WaitGroup
 		for i, t := range ts {
 			wg.Add(1)
-			go func() { defer wg.Done(); out[i] = reaper.Kill(t, force) }()
+			go func() { defer wg.Done(); out[i] = reaper.Kill(t, force, "tui") }()
 		}
 		wg.Wait()
 		return killMsg(out)
@@ -272,6 +317,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{tick()}
 		if !m.demo {
 			cmds = append(cmds, stealthStatus)
+			if m.graveyard {
+				m.loadGraves() // stealth mode may have buried something
+			}
 		}
 		if !m.scanning && !m.busy {
 			m.scanning = true
@@ -311,6 +359,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				freed += r.Target.TreeRSS
 				delete(m.marked, r.Target.PID)
 				m.gone[r.Target.PID] = true
+				if m.demo {
+					g := graveyard.DemoKill(r.Target, time.Now())
+					m.graves = append([]graveyard.Entry{g}, m.graves...)
+				}
 			} else {
 				bad = append(bad, r.Target.Name+": "+r.Msg)
 			}
@@ -319,7 +371,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.freed += freed
 		s := ""
 		if len(ok) > 0 {
-			s = fmt.Sprintf("☠ %d down · %s freed", len(ok), scan.Bytes(freed))
+			s = fmt.Sprintf("☠ %d down · %s freed · g graveyard to undo", len(ok), scan.Bytes(freed))
 			if m.demo {
 				s += " (demo, nothing was harmed)"
 			}
@@ -332,6 +384,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.scanning = true
 		return m, tea.Batch(m.setStatus(s, len(bad) > 0), m.scanCmd())
+
+	case reviveMsg:
+		m.busy = false
+		if msg.err != nil {
+			return m, m.setStatus("✗ couldn't revive "+msg.e.Name+": "+msg.err.Error(), true)
+		}
+		m.loadGraves()
+		m.scanning = true
+		return m, tea.Batch(m.setStatus("↺ revived "+msg.e.Name+" · ran "+msg.rv.Cmd, false), m.scanCmd())
 
 	case tea.KeyMsg:
 		return m.key(msg)
@@ -408,7 +469,14 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.graveyard {
+		return m.graveKey(k)
+	}
+
 	switch k.String() {
+	case "g":
+		m.graveyard = true
+		m.loadGraves()
 	case "q":
 		return m, tea.Quit
 	case "up", "k":
@@ -419,7 +487,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(-m.listHeight() / 2)
 	case "pgdown", "ctrl+d":
 		m.move(m.listHeight() / 2)
-	case "home", "g":
+	case "home":
 		m.cursor = 0
 	case "end", "G":
 		m.cursor = max(0, len(m.rows)-1)
@@ -506,6 +574,52 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scanning = true
 			return m, m.scanCmd()
 		}
+	case "?":
+		m.mode = modeHelp
+	}
+	return m, nil
+}
+
+func (m *model) gmove(d int) {
+	m.gcursor = max(0, min(len(m.graves)-1, m.gcursor+d))
+}
+
+// graveKey handles keys in the graveyard view.
+func (m *model) graveKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "q":
+		return m, tea.Quit
+	case "g", "esc":
+		m.graveyard = false
+	case "up", "k":
+		m.gmove(-1)
+	case "down", "j":
+		m.gmove(1)
+	case "pgup", "ctrl+u":
+		m.gmove(-m.listHeight() / 2)
+	case "pgdown", "ctrl+d":
+		m.gmove(m.listHeight() / 2)
+	case "home":
+		m.gcursor = 0
+	case "end", "G":
+		m.gcursor = max(0, len(m.graves)-1)
+	case "r", "enter":
+		g := m.currentGrave()
+		if g == nil || m.busy {
+			return m, nil
+		}
+		if m.demo {
+			now := time.Now()
+			g.Revived, g.RevivedPID = &now, g.PID
+			delete(m.gone, g.PID) // killed this session: back on the hit list
+			m.scanning = true
+			return m, tea.Batch(m.setStatus("↺ revived "+g.Name+" (demo) · would run "+graveyard.Command(*g), false), m.scanCmd())
+		}
+		m.busy = true
+		m.status, m.statusErr = "reviving "+g.Name+"…", false
+		return m, reviveCmd(*g)
+	case "m":
+		m.minimal = !m.minimal
 	case "?":
 		m.mode = modeHelp
 	}

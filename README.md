@@ -7,14 +7,14 @@
 The `next dev` from a terminal tab you closed on Tuesday. The Slack helper that outlived Slack.
 The SSH tunnel from last week. Spotify, open with no windows, holding 600 MB.
 appsassin finds all of it, explains why each one looks forgotten, and kills what you pick.
-You can also let it do this silently in the background.
+You can also let it do this silently in the background. Every kill can be undone.
 
 [![CI](https://github.com/mikemich/appsassin/actions/workflows/ci.yml/badge.svg)](https://github.com/mikemich/appsassin/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mikemich/appsassin?color=e0245e)](https://github.com/mikemich/appsassin/releases/latest)
 ![macOS](https://img.shields.io/badge/macOS-12%2B-black?logo=apple)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/demo.gif" alt="appsassin demo: marking three stray dev servers, killing them, engaging stealth mode, switching to minimal mode" width="880">
+<img src="docs/demo.gif" alt="appsassin demo: marking three stray dev servers, killing them, reviving a stealth kill from the graveyard, engaging stealth mode, switching to minimal mode" width="880">
 
 </div>
 
@@ -69,6 +69,24 @@ Processes get `SIGTERM` first, then `SIGKILL` if they ignore it. Each target's w
 
 <img src="docs/killed.png" alt="after the kill: 3 down, 1.0G freed" width="880">
 
+## Graveyard
+
+Every kill goes to the graveyard, whether you made it in the app, with `appsassin sweep`, or stealth mode made it while you weren't looking. appsassin records the full command line, its working directory, ports, and the bundle ID for apps. Bringing something back takes one command:
+
+```bash
+appsassin graveyard            # recent kills, newest first (--json, -n N)
+appsassin revive 2             # by number…
+appsassin revive "next dev"    # …or by name
+```
+
+Apps are reopened through LaunchServices (`open -b <bundle ID>`). Processes are re-run with their exact arguments in the directory they were started from. They run detached, with output going to `~/Library/Logs/appsassin-revived/`. appsassin prints exactly what it ran.
+
+In the app, press `g` to open the graveyard and `r` to revive the selected entry.
+
+<img src="docs/graveyard.png" alt="the graveyard: recent kills by the app and by stealth mode, with one about to be revived" width="880">
+
+The graveyard keeps the last 500 kills in `~/Library/Application Support/appsassin/graveyard.jsonl`. Only you can read the file, because command lines sometimes carry tokens.
+
 ## Minimal mode
 
 One line per target and nothing else, so it fits in a small tmux split. Start it with `appsassin -m` or press `m` to toggle.
@@ -91,6 +109,7 @@ You can also press `S` in the app.
 
 Stealth mode is deliberately conservative:
 
+- **Nothing it kills is lost.** Every kill lands in the [graveyard](#graveyard), and `appsassin revive <name>` brings it back. A process you revive is never killed again by stealth mode.
 - It only acts on targets scoring **≥ 70**.
 - It kills orphans and leftover helpers outright.
 - **Apps are only ever asked to quit**, never force-killed. An app with unsaved changes stays open, and stealth mode logs it.
@@ -136,6 +155,7 @@ It needs **no Accessibility, Screen Recording, Automation or admin permissions**
 | `x` | kill marked (or current) | `A` | show everything with any score |
 | `K` | force kill | `m` | toggle minimal mode |
 | `i` | spare it forever (ignore list) | `S` | toggle stealth mode |
+| `g` | graveyard (recent kills) | `r` | rescan · in the graveyard: revive |
 | `esc` | clear marks and filter | `?` / `q` | help / quit |
 
 ## Command line
@@ -143,6 +163,8 @@ It needs **no Accessibility, Screen Recording, Automation or admin permissions**
 ```bash
 appsassin list [--all] [--json]                  # print targets, scriptable
 appsassin sweep [--dry-run] [--apps] [--threshold N]  # one unattended pass, like stealth mode
+appsassin graveyard [-n N] [--json]              # what was killed, newest first
+appsassin revive <n|name>                        # bring a kill back
 appsassin config                                 # where the config lives and what's in it
 ```
 

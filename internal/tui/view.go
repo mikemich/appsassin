@@ -2,18 +2,26 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/mikemich/appsassin/internal/graveyard"
 	"github.com/mikemich/appsassin/internal/scan"
 )
 
 func (m *model) View() string {
 	if m.mode == modeHelp {
 		return m.helpView()
+	}
+	if m.graveyard {
+		if m.minimal {
+			return m.minimalGraveView()
+		}
+		return m.graveView()
 	}
 	if m.minimal {
 		return m.minimalView()
@@ -45,16 +53,19 @@ func spread(left, right string, w int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-// scroll keeps the cursor inside the visible window.
-func (m *model) scroll(h int) {
-	if m.cursor < m.offset {
-		m.offset = m.cursor
+// scrollTo returns the offset that keeps cursor inside a window of h of n rows.
+func scrollTo(cursor, offset, n, h int) int {
+	if cursor < offset {
+		offset = cursor
 	}
-	if m.cursor >= m.offset+h {
-		m.offset = m.cursor - h + 1
+	if cursor >= offset+h {
+		offset = cursor - h + 1
 	}
-	m.offset = max(0, min(m.offset, max(0, len(m.rows)-h)))
+	return max(0, min(offset, max(0, n-h)))
 }
+
+// scroll keeps the cursor inside the visible window.
+func (m *model) scroll(h int) { m.offset = scrollTo(m.cursor, m.offset, len(m.rows), h) }
 
 func (m *model) emptyLine() string {
 	switch {
@@ -229,11 +240,15 @@ func (m *model) statusLine(w int) string {
 func key(k, desc string) string { return sKey.Render(k) + " " + sDim.Render(desc) }
 
 func (m *model) helpLine(w int) string {
-	parts := []string{
+	return keyLine(w,
 		key("↑↓", "move"), key("space", "mark"), key("x", "kill"), key("K", "force"),
 		key("i", "spare"), key("/", "filter"), key("s", "sort"), key("m", "minimal"),
-		key("S", "stealth"), key("?", "help"), key("q", "quit"),
-	}
+		key("S", "stealth"), key("g", "graveyard"), key("?", "help"), key("q", "quit"),
+	)
+}
+
+// keyLine joins key hints, dropping whatever doesn't fit in w.
+func keyLine(w int, parts ...string) string {
 	out := ""
 	for _, p := range parts {
 		next := out
@@ -289,7 +304,7 @@ func (m *model) minimalView() string {
 	if s := m.statusLine(w); s != "" {
 		b.WriteString(s)
 	} else {
-		b.WriteString(key("x", "kill") + "  " + key("space", "mark") + "  " + key("m", "full") + "  " + key("?", "help") + "  " + key("q", "quit"))
+		b.WriteString(keyLine(w, key("x", "kill"), key("space", "mark"), key("g", "graves"), key("m", "full"), key("?", "help"), key("q", "quit")))
 	}
 	return b.String()
 }
@@ -297,7 +312,7 @@ func (m *model) minimalView() string {
 func (m *model) helpView() string {
 	rows := [][2]string{
 		{"↑↓ / j k", "move"},
-		{"g / G", "top / bottom"},
+		{"home / G", "top / bottom"},
 		{"space", "mark target"},
 		{"a", "mark all / none"},
 		{"x", "take out marked (or current) — apps are asked to quit politely"},
@@ -309,7 +324,8 @@ func (m *model) helpView() string {
 		{"A", "show everything with any stray score"},
 		{"m", "toggle minimal mode"},
 		{"S", "toggle stealth mode (silent background sweeper)"},
-		{"r", "rescan now"},
+		{"g", "graveyard: every kill, newest first · r revives the selected one"},
+		{"r", "rescan now (revive, in the graveyard)"},
 		{"esc", "clear marks and filter"},
 		{"q", "quit"},
 	}
@@ -322,4 +338,193 @@ func (m *model) helpView() string {
 	b.WriteString(sDim.Render("  apps nobody has touched rank highest. Busy processes rank lower.") + "\n\n")
 	b.WriteString(sFaint.Render("  any key to return"))
 	return b.String()
+}
+
+func killedAgo(e graveyard.Entry, now time.Time) string {
+	return scan.Human(now.Sub(e.Killed)) + " ago"
+}
+
+func (m *model) revivedCount() int {
+	n := 0
+	for _, e := range m.graves {
+		if e.Revived != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *model) graveEmpty() string {
+	if m.graveErr != nil {
+		return sErr.Render("couldn't read the graveyard: " + m.graveErr.Error())
+	}
+	return sDim.Render("the graveyard is empty — nothing has been killed yet")
+}
+
+func (m *model) graveView() string {
+	w := max(40, m.width)
+	now := time.Now()
+	var b strings.Builder
+
+	left := sBadge.Render("⚔ APPSASSIN") + "  " + sAccent.Render("☠ graveyard") +
+		sDim.Render(fmt.Sprintf("  %d kill%s · %d revived", len(m.graves), plural(len(m.graves)), m.revivedCount()))
+	b.WriteString(spread(left, m.stealthTag(), w) + "\n")
+	sub := "newest first · r brings the selected one back · "
+	if m.demo {
+		sub += "demo graveyard"
+	} else {
+		sub += strings.Replace(graveyard.Path(), home(), "~", 1)
+	}
+	b.WriteString(sFaint.Render(sub) + "\n")
+
+	// Columns: cursor(2) mark(2) killed(8) name kind(7) by(7) mem(6) command
+	nameW := max(12, min(30, (w-38)*2/5))
+	cmdW := max(0, w-38-nameW)
+	b.WriteString(sDim.Render("    "+fit("KILLED", 8)+" "+fit("TARGET", nameW)+" "+fit("KIND", 7)+" "+fit("BY", 7)+" "+fitR("MEM", 6)+"  "+fit("COMMAND", cmdW)) + "\n")
+
+	h := m.listHeight()
+	m.goffset = scrollTo(m.gcursor, m.goffset, len(m.graves), h)
+	lines := 0
+	if len(m.graves) == 0 {
+		b.WriteString("  " + m.graveEmpty() + "\n")
+		lines++
+	}
+	for i := m.goffset; i < len(m.graves) && lines < h; i++ {
+		e := m.graves[i]
+		sel := i == m.gcursor
+		on := func(s lipgloss.Style) lipgloss.Style {
+			if sel {
+				return s.Background(rowBg)
+			}
+			return s
+		}
+		sp := on(sText).Render(" ")
+		cur, mark := on(sText).Render("  "), on(sFaint).Render("☠ ")
+		if sel {
+			cur = on(sAccent).Render("▸ ")
+		}
+		if e.Revived != nil {
+			mark = on(sOK).Render("↺ ")
+		}
+		name := on(sText).Render(fit(e.Name, nameW))
+		if sel {
+			name = on(sBold).Render(fit(e.Name, nameW))
+		}
+		row := cur + mark + on(sDim).Render(fit(killedAgo(e, now), 8)) + sp + name + sp +
+			on(lipgloss.NewStyle().Foreground(kindColor(e.Kind))).Render(fit(string(e.Kind), 7)) + sp +
+			on(sDim).Render(fit(e.By, 7)) + sp + on(sText).Render(fitR(scan.Bytes(e.Mem), 6)) + sp + sp +
+			on(sDim).Render(fit(e.What(), cmdW))
+		if pad := w - lipgloss.Width(row); pad > 0 {
+			row += on(sText).Render(strings.Repeat(" ", pad))
+		}
+		b.WriteString(row + "\n")
+		lines++
+	}
+	for ; lines < h; lines++ {
+		b.WriteString("\n")
+	}
+
+	b.WriteString(m.graveDetail(w, now) + "\n")
+	b.WriteString(m.statusLine(w) + "\n")
+	b.WriteString(keyLine(w, key("↑↓", "move"), key("r", "revive"), key("g", "back"), key("m", "minimal"), key("?", "help"), key("q", "quit")))
+	return b.String()
+}
+
+func (m *model) graveDetail(w int, now time.Time) string {
+	inner := w - 4
+	lines := make([]string, 4)
+	if e := m.currentGrave(); e != nil {
+		lines[0] = sBold.Render(e.Name) + sDim.Render(fmt.Sprintf("  pid %d · killed %s by %s · score %d · %s",
+			e.PID, killedAgo(*e, now), e.By, e.Score, scan.Bytes(e.Mem)))
+		if e.Kind == scan.KindApp {
+			lines[1] = sText.Render(fit(e.Bundle, inner))
+			lines[2] = sDim.Render(e.BundleID + " · why " + strings.Join(e.Reasons, " · "))
+		} else {
+			cmd := e.Args
+			if cmd == "" {
+				cmd = e.Comm
+			}
+			lines[1] = sText.Render(fit(cmd, inner))
+			where := "in " + e.Cwd
+			if e.Cwd == "" {
+				where = "working directory unknown"
+			}
+			if len(e.Ports) > 0 {
+				ps := make([]string, len(e.Ports))
+				for i, p := range e.Ports {
+					ps[i] = fmt.Sprintf(":%d", p)
+				}
+				where += " · was listening " + strings.Join(ps, " ")
+			}
+			lines[2] = sDim.Render(where)
+		}
+		run := sDim.Render("r runs ") + sText.Render(graveyard.Command(*e))
+		if e.Revived != nil {
+			back := "↺ revived " + scan.Human(now.Sub(*e.Revived)) + " ago"
+			if e.RevivedPID > 0 {
+				back += fmt.Sprintf(" (pid %d)", e.RevivedPID)
+			}
+			run = sOK.Render(back) + sDim.Render(" · r again runs ") + sText.Render(graveyard.Command(*e))
+		}
+		lines[3] = run
+	} else {
+		lines[0] = sDim.Render("nothing selected")
+	}
+	for i, l := range lines {
+		lines[i] = ansi.Truncate(l, inner, "…")
+	}
+	return sBox.Width(w - 2).Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) minimalGraveView() string {
+	w := max(30, m.width)
+	now := time.Now()
+	var b strings.Builder
+	head := sAccent.Render("appsassin") + sDim.Render(fmt.Sprintf(" graveyard · %d", len(m.graves)))
+	b.WriteString(spread(head, m.stealthTag(), w) + "\n")
+
+	h := m.listHeight()
+	m.goffset = scrollTo(m.gcursor, m.goffset, len(m.graves), h)
+	lines := 0
+	if len(m.graves) == 0 {
+		b.WriteString(m.graveEmpty() + "\n")
+		lines++
+	}
+	for i := m.goffset; i < len(m.graves) && lines < h; i++ {
+		e := m.graves[i]
+		cur := " "
+		if i == m.gcursor {
+			cur = sAccent.Render("›")
+		}
+		mark := "  "
+		if e.Revived != nil {
+			mark = sOK.Render("↺ ")
+		}
+		nameW := max(10, min(28, w/3))
+		row := cur + mark + sDim.Render(fitR(scan.Human(now.Sub(e.Killed)), 4)) + " " + sText.Render(fit(e.Name, nameW)) + " " +
+			lipgloss.NewStyle().Foreground(kindColor(e.Kind)).Render(fit(string(e.Kind), 6)) + " " + sDim.Render(e.By)
+		b.WriteString(ansi.Truncate(row, w, "…") + "\n")
+		lines++
+	}
+	for ; lines < h; lines++ {
+		b.WriteString("\n")
+	}
+	if s := m.statusLine(w); s != "" {
+		b.WriteString(s)
+	} else {
+		b.WriteString(keyLine(w, key("r", "revive"), key("g", "back"), key("m", "full"), key("?", "help"), key("q", "quit")))
+	}
+	return b.String()
+}
+
+func home() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mikemich/appsassin/internal/config"
+	"github.com/mikemich/appsassin/internal/graveyard"
 	"github.com/mikemich/appsassin/internal/macos"
 	"github.com/mikemich/appsassin/internal/reaper"
 	"github.com/mikemich/appsassin/internal/scan"
@@ -164,14 +165,20 @@ func Eligible(t *scan.Target, cfg config.Config, now, watchedSince time.Time, ap
 }
 
 // Sweep runs one unattended pass. Apps are only ever asked to quit politely.
-func Sweep(cfg config.Config, tr *scan.Tracker, watchedSince time.Time, apps, dryRun bool, logf func(string, ...any)) ([]reaper.Result, error) {
+// Kills go to the graveyard credited to by. Anything revived from the
+// graveyard is left alone.
+func Sweep(cfg config.Config, tr *scan.Tracker, watchedSince time.Time, apps, dryRun bool, by string, logf func(string, ...any)) ([]reaper.Result, error) {
 	res, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr})
 	if err != nil {
 		return nil, err
 	}
+	revived := graveyard.Revived()
 	var out []reaper.Result
 	for _, t := range res.Targets {
 		if !Eligible(t, cfg, res.At, watchedSince, apps) {
+			continue
+		}
+		if at, ok := revived[t.PID]; ok && !t.Started.Before(at.Add(-time.Minute)) {
 			continue
 		}
 		desc := fmt.Sprintf("%s pid=%d %q score=%d mem=%s why=[%s]",
@@ -181,7 +188,7 @@ func Sweep(cfg config.Config, tr *scan.Tracker, watchedSince time.Time, apps, dr
 			out = append(out, reaper.Result{Target: t, OK: true, Msg: "dry run"})
 			continue
 		}
-		r := reaper.Kill(t, false)
+		r := reaper.Kill(t, false, by)
 		if r.OK {
 			logf("killed %s (%s)", desc, r.Msg)
 		} else {
@@ -247,7 +254,7 @@ func Run(dryRun bool) error {
 				continue
 			}
 			cfg = config.Load() // pick up edits without a restart
-			if _, err := Sweep(cfg, tr, started, cfg.Stealth.Apps, dryRun || cfg.Stealth.DryRun, logf); err != nil {
+			if _, err := Sweep(cfg, tr, started, cfg.Stealth.Apps, dryRun || cfg.Stealth.DryRun, "stealth", logf); err != nil {
 				logf("sweep error: %v", err)
 			}
 			_ = tr.Save()
