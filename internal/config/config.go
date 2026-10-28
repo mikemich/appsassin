@@ -16,6 +16,7 @@ type Stealth struct {
 	Apps      bool   `json:"apps"`      // also quit windowless, unused GUI apps
 	AppIdle   string `json:"appIdle"`   // how long an app must go unused first
 	DryRun    bool   `json:"dryRun"`    // log only, never kill
+	Notify    bool   `json:"notify"`    // post a notification after each sweep that killed something
 }
 
 type Config struct {

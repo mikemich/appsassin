@@ -87,6 +87,17 @@ appsassin kill 48213 -y        # by PID, without asking (-f to force)
 appsassin ps                   # everything you're running, biggest first (--json)
 ```
 
+## Free up memory in one command
+
+Low on memory? Say how much you want back:
+
+```bash
+appsassin free 2G --dry-run    # see what it would take out
+appsassin free 2G              # take it out (asks first)
+```
+
+It picks the most forgotten strays first (highest score, then biggest) until the amount is covered, shows you the list, and asks once. If every stray together holds less than you asked for, it tells you so. It never touches anything that isn't a stray, and `--threshold N` raises the bar.
+
 ## Graveyard
 
 Every kill goes to the graveyard, whether you made it in the app, with `appsassin sweep`, or stealth mode made it while you weren't looking. appsassin records the full command line, its working directory, ports, and the bundle ID for apps. Bringing something back takes one command:
@@ -95,6 +106,7 @@ Every kill goes to the graveyard, whether you made it in the app, with `appsassi
 appsassin graveyard            # recent kills, newest first (--json, -n N)
 appsassin revive 2             # by number…
 appsassin revive "next dev"    # …or by name
+appsassin undo                 # bring back the whole last batch: a stealth sweep, a free, a multi-kill
 ```
 
 Apps are reopened through LaunchServices (`open -b <bundle ID>`). Processes are re-run with their exact arguments in the directory they were started from. They run detached, with output going to `~/Library/Logs/appsassin-revived/`. appsassin prints exactly what it ran.
@@ -122,6 +134,8 @@ appsassin stealth status | log | stop | uninstall
 ```
 
 You can also press `S` in the app.
+
+Want to know when it acts? `appsassin stealth notify on` posts a notification after each sweep that kills something, such as "appsassin took out 3 strays · 1.1G freed · undo: appsassin undo". Notifications arrive through Script Editor, so if none appear, allow Script Editor's notifications in System Settings. `notify off` makes it silent again.
 
 <img src="docs/stealth.png" alt="stealth mode log" width="880">
 
@@ -189,6 +203,8 @@ It needs **no Accessibility, Screen Recording, Automation or admin permissions**
 ```bash
 appsassin kill <name|pid|:port> [-y] [-f]       # kill anything you're running
 appsassin ps [--json]                            # everything you're running
+appsassin free <amount> [--dry-run] [-y]         # kill the most forgotten strays until that much memory is back
+appsassin undo [-y]                              # revive the last batch of kills
 appsassin list [--all] [--json]                  # print stray targets, scriptable
 appsassin sweep [--dry-run] [--apps] [--threshold N]  # one unattended pass, like stealth mode
 appsassin graveyard [-n N] [--json]              # what was killed, newest first
@@ -205,7 +221,7 @@ appsassin config                                 # where the config lives and wh
   "threshold": 30,
   "minimal": false,
   "ignore": ["tmux", "screen", "zellij", "ssh-agent", "gpg-agent", "mosh-server"],
-  "stealth": { "interval": "5m", "threshold": 70, "apps": true, "appIdle": "6h", "dryRun": false }
+  "stealth": { "interval": "5m", "threshold": 70, "apps": true, "appIdle": "6h", "dryRun": false, "notify": false }
 }
 ```
 

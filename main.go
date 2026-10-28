@@ -30,6 +30,10 @@ usage:
   appsassin kill <name|pid|:port> [-y] [-f]
                                  kill anything you're running, e.g. kill slack, kill :3000
   appsassin ps [--json]          everything you're running: apps, processes, ports
+  appsassin free <amount> [--dry-run] [-y]
+                                 kill the most forgotten strays until that much memory
+                                 is back, e.g. free 2G
+  appsassin undo [-y]            revive the last batch of kills (a sweep, a free, …)
   appsassin list [--all] [--json]
                                  print targets and exit
   appsassin sweep [--dry-run] [--apps] [--threshold N]
@@ -45,6 +49,7 @@ usage:
       log [-n N]                 show what it did
       install                    start automatically at every login (LaunchAgent)
       uninstall                  remove the LaunchAgent
+      notify on|off              a notification after each sweep that kills something
   appsassin config               show config path and contents
   appsassin version
 
@@ -78,6 +83,10 @@ func main() {
 		err = ps(cfg, args)
 	case "kill":
 		err = kill(cfg, args)
+	case "free":
+		err = free(cfg, args)
+	case "undo":
+		err = undo(args)
 	case "sweep":
 		err = sweep(cfg, args)
 	case "graveyard", "graves":
@@ -258,7 +267,7 @@ func stealthCmd(args []string) error {
 		} else {
 			fmt.Println("○ not running")
 		}
-		fmt.Printf("  at login: %v\n  log: %s\n", stealth.Installed(), config.LogPath())
+		fmt.Printf("  at login: %v\n  notify: %v\n  log: %s\n", stealth.Installed(), config.Load().Stealth.Notify, config.LogPath())
 	case "log":
 		c := exec.Command("tail", "-n", fmt.Sprint(*n), config.LogPath())
 		c.Stdout, c.Stderr = os.Stdout, os.Stderr
@@ -268,6 +277,20 @@ func stealthCmd(args []string) error {
 			return err
 		}
 		fmt.Println("◉ stealth mode will now run silently at every login")
+	case "notify":
+		on := len(rest) > 0 && (rest[0] == "on" || rest[0] == "true")
+		if len(rest) == 0 || (!on && rest[0] != "off" && rest[0] != "false") {
+			return errors.New("usage: appsassin stealth notify on|off")
+		}
+		if err := stealth.SetNotify(on); err != nil {
+			return err
+		}
+		if on {
+			fmt.Println("◉ stealth mode will post a notification after each sweep that kills something")
+			fmt.Println("  (they come from Script Editor; allow its notifications in System Settings if none appear)")
+		} else {
+			fmt.Println("○ stealth mode will stay silent")
+		}
 	case "uninstall":
 		if err := stealth.Uninstall(); err != nil {
 			return err

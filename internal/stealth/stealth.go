@@ -199,6 +199,34 @@ func Sweep(cfg config.Config, tr *scan.Tracker, watchedSince time.Time, apps, dr
 	return out, nil
 }
 
+// notify tells the user what a sweep took out and how to undo it.
+func notify(rs []reaper.Result) error {
+	var names []string
+	var freed int64
+	for _, r := range rs {
+		if r.OK {
+			names = append(names, r.Target.Name)
+			freed += r.Target.TreeRSS
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	title := fmt.Sprintf("appsassin took out %d stray%s", len(names), map[bool]string{true: "", false: "s"}[len(names) == 1])
+	sub := strings.Join(names, ", ")
+	if len(sub) > 60 {
+		sub = sub[:57] + "…"
+	}
+	return macos.Notify(title, sub, scan.Bytes(freed)+" freed · undo: appsassin undo")
+}
+
+// SetNotify turns sweep notifications on or off in the config.
+func SetNotify(on bool) error {
+	cfg := config.Load()
+	cfg.Stealth.Notify = on
+	return cfg.Save()
+}
+
 // Run is the daemon body.
 func Run(dryRun bool) error {
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, 15)
@@ -254,8 +282,14 @@ func Run(dryRun bool) error {
 				continue
 			}
 			cfg = config.Load() // pick up edits without a restart
-			if _, err := Sweep(cfg, tr, started, cfg.Stealth.Apps, dryRun || cfg.Stealth.DryRun, "stealth", logf); err != nil {
+			rs, err := Sweep(cfg, tr, started, cfg.Stealth.Apps, dryRun || cfg.Stealth.DryRun, "stealth", logf)
+			if err != nil {
 				logf("sweep error: %v", err)
+			}
+			if cfg.Stealth.Notify && !dryRun && !cfg.Stealth.DryRun {
+				if err := notify(rs); err != nil {
+					logf("notification failed: %v", err)
+				}
 			}
 			_ = tr.Save()
 			nextSweep = now.Add(cfg.Stealth.IntervalDur())
