@@ -51,6 +51,12 @@ func kindColor(k scan.Kind) lipgloss.TerminalColor {
 		return sky
 	case scan.KindHelper:
 		return violet
+	case scan.KindMenu:
+		return sky
+	case scan.KindService:
+		return amber
+	case scan.KindProc:
+		return dim
 	default:
 		return ember
 	}

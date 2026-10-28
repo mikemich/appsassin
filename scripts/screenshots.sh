@@ -45,6 +45,17 @@ PAUSE=0.15 keys Down; PAUSE=0.15 keys Down; keys Down; gif 1.4
 grab graveyard && render graveyard docs/graveyard.png
 keys r; gif 2.4
 keys g; gif 1.2
+# Everything running: tab over, find a dev server by port, kill it.
+keys Tab; gif 2.0
+for _ in 1 2 3 4 5 6; do PAUSE=0.05 keys Down; done
+sleep 6 # let the status line clear
+grab everything && render everything docs/everything.png
+keys /; keys ':5174'; keys Enter; gif 1.8
+keys x; gif 1.4
+keys y
+sleep 1.3
+gif 1.8
+keys Escape; keys Tab; gif 1.0
 keys S; gif 2.2
 keys y; gif 1.6
 keys m; gif 2.4

@@ -27,10 +27,12 @@ const (
 	sortMem
 	sortAge
 	sortName
+	sortCPU
+	numSorts
 )
 
 func (s sortMode) String() string {
-	return [...]string{"score", "memory", "age", "name"}[s]
+	return [...]string{"score", "memory", "age", "name", "cpu"}[s]
 }
 
 type mode int
@@ -45,8 +47,9 @@ const (
 
 type (
 	scanMsg struct {
-		res *scan.Result
-		err error
+		res        *scan.Result
+		err        error
+		everything bool // which view asked for it
 	}
 	stealthMsg struct {
 		pid int
@@ -96,6 +99,8 @@ type model struct {
 	kills int
 	freed int64
 
+	everything bool // listing everything running, not just strays
+
 	graveyard bool // showing the graveyard instead of the hit list
 	graves    []graveyard.Entry
 	gcursor   int
@@ -109,7 +114,7 @@ type model struct {
 }
 
 // Run starts the TUI.
-func Run(cfg config.Config, minimal, demo bool) error {
+func Run(cfg config.Config, minimal, demo, everything bool) error {
 	m := &model{
 		cfg:       cfg,
 		tracker:   scan.LoadTracker(),
@@ -120,6 +125,9 @@ func Run(cfg config.Config, minimal, demo bool) error {
 		height:    30,
 		demo:      demo,
 		gone:      map[int]bool{},
+	}
+	if everything {
+		m.everything, m.sort = true, sortMem
 	}
 	if demo {
 		m.threshold = 30
@@ -144,18 +152,21 @@ func tick() tea.Cmd {
 }
 
 func (m *model) scanCmd() tea.Cmd {
-	cfg, tr := m.cfg, m.tracker
+	cfg, tr, all := m.cfg, m.tracker, m.everything
 	if m.demo {
 		gone := map[int]bool{}
 		for k, v := range m.gone {
 			gone[k] = v
 		}
-		return func() tea.Msg { return scanMsg{scan.Demo(gone), nil} }
+		if all {
+			return func() tea.Msg { return scanMsg{scan.DemoAll(gone), nil, all} }
+		}
+		return func() tea.Msg { return scanMsg{scan.Demo(gone), nil, all} }
 	}
 	return func() tea.Msg {
-		r, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr})
+		r, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr, Everything: all})
 		_ = tr.Save()
-		return scanMsg{r, err}
+		return scanMsg{r, err, all}
 	}
 }
 
@@ -181,7 +192,7 @@ func (m *model) rebuild() {
 	if m.res != nil {
 		q := strings.ToLower(m.filter)
 		for _, t := range m.res.Targets {
-			if !m.showAll && t.Score < m.threshold {
+			if !m.everything && !m.showAll && t.Score < m.threshold {
 				continue
 			}
 			if q != "" {
@@ -198,6 +209,7 @@ func (m *model) rebuild() {
 		sortMem:   func(a, b *scan.Target) bool { return a.TreeRSS > b.TreeRSS },
 		sortAge:   func(a, b *scan.Target) bool { return a.Started.Before(b.Started) },
 		sortName:  func(a, b *scan.Target) bool { return strings.ToLower(a.Name) < strings.ToLower(b.Name) },
+		sortCPU:   func(a, b *scan.Target) bool { return a.CPU > b.CPU },
 	}[m.sort]
 	sort.SliceStable(m.rows, func(i, j int) bool { return less(m.rows[i], m.rows[j]) })
 
@@ -329,6 +341,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanMsg:
 		m.scanning = false
+		if msg.everything != m.everything {
+			// The view changed while this scan ran; fetch the right one.
+			m.scanning = true
+			return m, m.scanCmd()
+		}
 		m.err = msg.err
 		if msg.err == nil {
 			m.res = msg.res
@@ -474,6 +491,19 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch k.String() {
+	case "tab":
+		m.everything = !m.everything
+		m.marked = map[int]bool{}
+		m.res, m.rows, m.cursor, m.offset = nil, nil, 0, 0
+		m.sort = sortScore
+		if m.everything {
+			m.sort = sortMem
+		}
+		if m.scanning {
+			return m, nil // the in-flight scan is for the other view; its result triggers a fresh one
+		}
+		m.scanning = true
+		return m, m.scanCmd()
 	case "g":
 		m.graveyard = true
 		m.loadGraves()
@@ -546,7 +576,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.mode = modeFilter
 	case "s":
-		m.sort = (m.sort + 1) % 4
+		m.sort = (m.sort + 1) % numSorts
 		m.rebuild()
 		return m, m.setStatus("sort: "+m.sort.String(), false)
 	case "m":

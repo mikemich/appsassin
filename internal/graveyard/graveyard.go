@@ -53,7 +53,7 @@ type Entry struct {
 // What is a one-line description of what the entry was running.
 func (e Entry) What() string {
 	switch {
-	case e.Kind == scan.KindApp && e.BundleID != "":
+	case e.Kind.IsApp() && e.BundleID != "":
 		return e.BundleID
 	case e.Args != "":
 		return e.Args
@@ -269,7 +269,7 @@ func Command(e Entry) string {
 }
 
 func command(e Entry, dir string) string {
-	if e.Kind == scan.KindApp {
+	if e.Kind.IsApp() {
 		if e.BundleID != "" {
 			return "open -b " + quote(e.BundleID)
 		}
@@ -303,7 +303,7 @@ var unsafeName = regexp.MustCompile(`[^a-z0-9._-]+`)
 // going to a log file. The entry is marked as revived.
 func Revive(e Entry) (Revival, error) {
 	rv := Revival{Cmd: command(e, e.dir())}
-	if e.Kind == scan.KindApp {
+	if e.Kind.IsApp() {
 		var out []byte
 		var err error
 		if e.BundleID != "" {

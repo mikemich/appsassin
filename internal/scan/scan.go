@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -23,7 +24,15 @@ const (
 	KindApp    Kind = "app"    // GUI app with a Dock icon
 	KindHelper Kind = "helper" // helper process whose parent app has quit
 	KindOrphan Kind = "orphan" // process whose parent died (closed terminal, crashed tool…)
+
+	// Non-strays, only listed when scanning with Options.Everything.
+	KindMenu    Kind = "menubar" // menu-bar or background-only app
+	KindService Kind = "service" // launchd job (may be restarted after a kill)
+	KindProc    Kind = "process" // anything else the user is running
 )
+
+// IsApp reports whether k is quit through NSRunningApplication rather than signals.
+func (k Kind) IsApp() bool { return k == KindApp || k == KindMenu }
 
 // Target is a candidate for assassination.
 type Target struct {
@@ -45,7 +54,9 @@ type Target struct {
 	Hidden    bool
 	LastUsed  time.Time // apps only
 	UsedKnown bool      // LastUsed was observed rather than assumed from launch time
+	TTY       string
 	Score     int
+	Stray     bool // looks forgotten; false for things listed only by Options.Everything
 	Reasons   []string
 }
 
@@ -61,8 +72,9 @@ func (t *Target) Key() string {
 func (t *Target) Idle(now time.Time) time.Duration { return now.Sub(t.LastUsed) }
 
 type Result struct {
-	Targets  []*Target // scored > 0, sorted by score desc
-	Scanned  int       // processes examined
+	Targets  []*Target       // scored > 0 (or everything, with Options.Everything), sorted by score desc
+	All      map[int]*Target // with Options.Everything: every listed process, including ones folded into a parent
+	Scanned  int             // processes examined
 	FrontPID int
 	At       time.Time
 	Took     time.Duration
@@ -71,6 +83,10 @@ type Result struct {
 type Options struct {
 	Config  config.Config
 	Tracker *Tracker // optional
+
+	// Everything also lists apps and processes that aren't strays, so anything
+	// the user runs can be found and killed. Strays keep their scores.
+	Everything bool
 }
 
 var (
@@ -204,6 +220,17 @@ func Scan(opt Options) (*Result, error) {
 		pid = p.PPID
 	}
 
+	// …including the helpers of the app we run in (its main process is protected,
+	// so they'd otherwise look like unrelated processes).
+	protectedBundles := map[string]bool{}
+	for pid := range protected {
+		if p := procs[pid]; p != nil {
+			if b := outerBundle(p.Comm); b != "" {
+				protectedBundles[b] = true
+			}
+		}
+	}
+
 	children := map[int][]int{}
 	liveBundles := map[string]bool{}
 	for _, p := range procs {
@@ -230,13 +257,14 @@ func Scan(opt Options) (*Result, error) {
 			continue
 		}
 		if isSystem(p.Comm) || (selfExe != "" && p.Comm == selfExe) ||
-			strings.Contains(p.Comm, ".appex/") || strings.Contains(p.Comm, ".xpc/") {
+			strings.Contains(p.Comm, ".appex/") || strings.Contains(p.Comm, ".xpc/") ||
+			protectedBundles[outerBundle(p.Comm)] {
 			continue // system-managed extensions & XPC services come and go on their own
 		}
 		t := &Target{
-			PID: p.PID, PPID: p.PPID, Comm: p.Comm, Args: p.Args, CPU: p.CPU, RSS: p.RSS,
+			PID: p.PID, PPID: p.PPID, Comm: p.Comm, Args: p.Args, CPU: p.CPU, RSS: p.RSS, TTY: p.TTY,
 			Started: now.Add(-p.Elapsed), Ports: ports[p.PID], Bundle: outerBundle(p.Comm),
-			Name: displayName(p),
+			Name: clean(displayName(p)), Stray: true,
 		}
 		score := 0
 		add := func(n int, why string) {
@@ -251,21 +279,29 @@ func Scan(opt Options) (*Result, error) {
 		if t.Bundle != "" {
 			info, isApp = macos.App(p.PID)
 		}
-
-		dev := isDev(p, t.Name)
-		switch {
-		case isApp && info.Policy == macos.PolicyRegular:
-			if protectedBundleIDs[info.BundleID] || p.PID == front {
-				continue // the front app is in use by definition
-			}
-			t.Kind = KindApp
-			t.Name = info.Name
+		setApp := func(k Kind) {
+			t.Kind = k
+			t.Name = clean(info.Name)
 			t.BundleID = info.BundleID
 			if info.BundlePath != "" {
 				t.Bundle = info.BundlePath
 			}
 			t.Hidden = info.Hidden
 			t.Windows, t.OnScreen = ws.Total[p.PID], ws.OnScreen[p.PID]
+		}
+
+		dev := isDev(p, t.Name)
+		switch {
+		case isApp && info.Policy == macos.PolicyRegular:
+			if protectedBundleIDs[info.BundleID] {
+				continue
+			}
+			setApp(KindApp)
+			if p.PID == front {
+				t.Stray = false // the front app is in use by definition
+				t.Reasons = []string{"in front"}
+				break
+			}
 			t.LastUsed = t.Started
 			if opt.Tracker != nil {
 				if last, ok := opt.Tracker.Get(t.Bundle); ok && !last.Before(t.Started) {
@@ -298,16 +334,23 @@ func Scan(opt Options) (*Result, error) {
 			}
 
 		case isApp && !dev:
-			continue // menu-bar agents & background-only apps exist on purpose
+			setApp(KindMenu) // menu-bar agents & background-only apps exist on purpose
+			t.Stray = false
 
 		default:
 			// Stray = adopted by launchd (its parent died) without being a launchd
 			// job, and not attached to any terminal.
-			if p.PPID != 1 || p.TTY != "??" || jobs[p.PID] {
-				continue
-			}
-			if t.Bundle != "" && liveBundles[t.Bundle] {
-				continue // e.g. crash handlers of an app that is still running
+			// A dev runtime that merely ships inside an app (Python in Xcode.app)
+			// isn't that app's helper.
+			if p.PPID != 1 || p.TTY != "??" || jobs[p.PID] || (t.Bundle != "" && liveBundles[t.Bundle] && !dev) {
+				if interactiveShell(p) {
+					continue // a terminal tab, not something to hunt
+				}
+				t.Kind, t.Stray = KindProc, false
+				if jobs[p.PID] {
+					t.Kind = KindService
+				}
+				break
 			}
 			if t.Bundle != "" && !dev {
 				t.Kind = KindHelper
@@ -321,16 +364,20 @@ func Scan(opt Options) (*Result, error) {
 			}
 		}
 
-		if opt.Config.Ignored(t.Name, p.Comm, t.BundleID, t.Bundle) {
+		if t.Stray && opt.Config.Ignored(t.Name, p.Comm, t.BundleID, t.Bundle) {
+			t.Stray, t.Reasons = false, []string{"spared (ignore list)"}
+		}
+		if !t.Stray {
+			if !opt.Everything {
+				continue
+			}
+			describe(t, p, jobs[p.PID])
+			targets = append(targets, t)
 			continue
 		}
 
 		if len(t.Ports) > 0 {
-			ps := make([]string, len(t.Ports))
-			for i, port := range t.Ports {
-				ps[i] = fmt.Sprintf(":%d", port)
-			}
-			add(10, "listening "+strings.Join(ps, " "))
+			add(10, "listening "+portList(t.Ports))
 		}
 		switch {
 		case p.CPU >= 25:
@@ -357,18 +404,7 @@ func Scan(opt Options) (*Result, error) {
 	for _, t := range targets {
 		byPID[t.PID] = t
 	}
-	var roots []*Target
-	for _, t := range targets {
-		covered := false
-		for q := procs[t.PPID]; q != nil && q.PID > 1; q = procs[q.PPID] {
-			if byPID[q.PID] != nil {
-				covered = true
-				break
-			}
-		}
-		if covered {
-			continue
-		}
+	descend := func(t *Target) {
 		t.TreeRSS = t.RSS
 		queue := append([]int(nil), children[t.PID]...)
 		for len(queue) > 0 {
@@ -382,6 +418,23 @@ func Scan(opt Options) (*Result, error) {
 			t.TreeRSS += cp.RSS
 			queue = append(queue, children[c]...)
 		}
+	}
+	var roots []*Target
+	for _, t := range targets {
+		covered := false
+		for q := procs[t.PPID]; q != nil && q.PID > 1; q = procs[q.PPID] {
+			if byPID[q.PID] != nil {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			if opt.Everything {
+				descend(t) // still findable by PID or port, e.g. by `appsassin kill`
+			}
+			continue
+		}
+		descend(t)
 		mem := 0
 		switch {
 		case t.TreeRSS > 2<<30:
@@ -391,12 +444,12 @@ func Scan(opt Options) (*Result, error) {
 		case t.TreeRSS > 150<<20:
 			mem = 5
 		}
-		if mem > 0 {
+		if mem > 0 && t.Stray {
 			t.Score += mem
 			t.Reasons = append(t.Reasons, Bytes(t.TreeRSS)+" held")
 		}
 		t.Score = max(0, min(99, t.Score))
-		if t.Score > 0 {
+		if t.Score > 0 || opt.Everything {
 			roots = append(roots, t)
 		}
 	}
@@ -407,5 +460,55 @@ func Scan(opt Options) (*Result, error) {
 		return roots[i].TreeRSS > roots[j].TreeRSS
 	})
 
-	return &Result{Targets: roots, Scanned: len(procs), FrontPID: front, At: now, Took: time.Since(start)}, nil
+	res := &Result{Targets: roots, Scanned: len(procs), FrontPID: front, At: now, Took: time.Since(start)}
+	if opt.Everything {
+		res.All = byPID
+	}
+	return res, nil
+}
+
+var shells = map[string]bool{"zsh": true, "bash": true, "fish": true, "sh": true, "tcsh": true, "ksh": true, "nu": true, "login": true}
+
+// interactiveShell is a shell sitting at a terminal prompt: killing it just closes a tab.
+func interactiveShell(p *Proc) bool {
+	return p.TTY != "??" && shells[strings.TrimPrefix(filepath.Base(p.Comm), "-")]
+}
+
+// clean drops invisible formatting characters some apps put in their names
+// (WhatsApp's is "\u200eWhatsApp").
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func portList(ports []int) string {
+	ps := make([]string, len(ports))
+	for i, port := range ports {
+		ps[i] = fmt.Sprintf(":%d", port)
+	}
+	return strings.Join(ps, " ")
+}
+
+// describe fills Reasons for a non-stray with what's useful to know before killing it.
+func describe(t *Target, p *Proc, launchdJob bool) {
+	add := func(s string) { t.Reasons = append(t.Reasons, s) }
+	if len(t.Ports) > 0 {
+		add("listening " + portList(t.Ports))
+	}
+	if t.Kind.IsApp() && t.Windows > 0 {
+		add(fmt.Sprintf("%d window%s", t.Windows, map[bool]string{true: "", false: "s"}[t.Windows == 1]))
+	}
+	if p.TTY != "??" {
+		add("in terminal " + p.TTY)
+	}
+	if launchdJob && !t.Kind.IsApp() {
+		add("launchd job, may restart")
+	}
+	if p.CPU >= 25 {
+		add(fmt.Sprintf("busy %.0f%% CPU", p.CPU))
+	}
 }

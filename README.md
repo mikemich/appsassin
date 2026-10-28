@@ -8,13 +8,14 @@ The `next dev` from a terminal tab you closed on Tuesday. The Slack helper that 
 The SSH tunnel from last week. Spotify, open with no windows, holding 600 MB.
 appsassin finds all of it, explains why each one looks forgotten, and kills what you pick.
 You can also let it do this silently in the background. Every kill can be undone.
+Want something else gone? `appsassin kill slack` or `appsassin kill :3000` works on anything you're running.
 
 [![CI](https://github.com/mikemich/appsassin/actions/workflows/ci.yml/badge.svg)](https://github.com/mikemich/appsassin/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mikemich/appsassin?color=e0245e)](https://github.com/mikemich/appsassin/releases/latest)
 ![macOS](https://img.shields.io/badge/macOS-12%2B-black?logo=apple)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/demo.gif" alt="appsassin demo: marking three stray dev servers, killing them, reviving a stealth kill from the graveyard, engaging stealth mode, switching to minimal mode" width="880">
+<img src="docs/demo.gif" alt="appsassin demo: marking three stray dev servers, killing them, reviving a stealth kill from the graveyard, finding a dev server by port in the everything view and killing it, engaging stealth mode, switching to minimal mode" width="880">
 
 </div>
 
@@ -68,6 +69,23 @@ The list is sorted by how forgotten each target looks. The detail pane shows the
 Processes get `SIGTERM` first, then `SIGKILL` if they ignore it. Each target's whole process tree goes with it, so `npm` doesn't leave a `node` behind. **Apps get a polite Cmd-Q**, so if they have unsaved work they can ask you about it. `K` force-kills when you really mean it.
 
 <img src="docs/killed.png" alt="after the kill: 3 down, 1.0G freed" width="880">
+
+## Kill anything, not just strays
+
+Sometimes you know exactly what you want gone. Press `tab` in the app to see **everything you're running**: apps, menu-bar apps, launchd services, and processes in other terminal tabs. Each row shows its CPU, memory, ports and windows. Helpers are folded into their app, so Chrome is one row, not 40. Strays still show their score.
+
+Press `/` and type part of a name, a PID or a port such as `:5174`. Then `x` kills it, with the same confirmation, the same polite Cmd-Q for apps, and the same graveyard. Start in this view with `appsassin -e`.
+
+<img src="docs/everything.png" alt="everything running: apps, menu-bar apps, services and terminal processes with CPU, memory and ports" width="880">
+
+Or skip the app and do it from the shell:
+
+```bash
+appsassin kill slack           # by name (asks first; lets you pick if several match)
+appsassin kill :3000           # whatever is listening on a port
+appsassin kill 48213 -y        # by PID, without asking (-f to force)
+appsassin ps                   # everything you're running, biggest first (--json)
+```
 
 ## Graveyard
 
@@ -135,10 +153,17 @@ Stealth mode is deliberately conservative:
 
 ## What it will never touch
 
+It never kills these, not even when you ask:
+
 - Anything owned by root or another user, or anything under `/System/Library`, `/usr/libexec`, `/usr/sbin` or `/Library/Apple`
-- launchd-managed jobs, app extensions (`.appex`) and XPC services
-- Anything attached to a terminal, appsassin itself, and the shell and terminal app it's running in
-- The front app, menu-bar and background-only apps, Finder, Dock, Control Center
+- App extensions (`.appex`) and XPC services
+- appsassin itself, the shell and terminal app it's running in, and Finder, Dock and Control Center
+
+The stray hunt and stealth mode never flag these either. You can still kill them yourself from the everything view or with `appsassin kill`:
+
+- launchd-managed jobs
+- Processes attached to a terminal
+- The front app, menu-bar and background-only apps
 - Anything on your ignore list. Press `i` to spare a target forever. `tmux`, `screen`, `ssh-agent` and `gpg-agent` are on it by default.
 
 Just before it sends a signal, appsassin checks that the PID still belongs to the same executable. A PID reused by another process is never hit.
@@ -149,19 +174,22 @@ It needs **no Accessibility, Screen Recording, Automation or admin permissions**
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `↑↓` `j k` | move | `/` | filter |
-| `space` | mark | `s` | sort: score → memory → age → name |
-| `a` | mark all / none | `+` `-` | raise / lower the score threshold |
-| `x` | kill marked (or current) | `A` | show everything with any score |
-| `K` | force kill | `m` | toggle minimal mode |
-| `i` | spare it forever (ignore list) | `S` | toggle stealth mode |
-| `g` | graveyard (recent kills) | `r` | rescan · in the graveyard: revive |
-| `esc` | clear marks and filter | `?` / `q` | help / quit |
+| `↑↓` `j k` | move | `/` | find by name, PID or `:port` |
+| `tab` | strays ⇄ everything running | `s` | sort: score → memory → age → name → CPU |
+| `space` | mark | `+` `-` | raise / lower the score threshold |
+| `a` | mark all / none | `A` | show everything with any score |
+| `x` | kill marked (or current) | `m` | toggle minimal mode |
+| `K` | force kill | `S` | toggle stealth mode |
+| `i` | spare it forever (ignore list) | `r` | rescan · in the graveyard: revive |
+| `g` | graveyard (recent kills) | `?` / `q` | help / quit |
+| `esc` | clear marks and filter | | |
 
 ## Command line
 
 ```bash
-appsassin list [--all] [--json]                  # print targets, scriptable
+appsassin kill <name|pid|:port> [-y] [-f]       # kill anything you're running
+appsassin ps [--json]                            # everything you're running
+appsassin list [--all] [--json]                  # print stray targets, scriptable
 appsassin sweep [--dry-run] [--apps] [--threshold N]  # one unattended pass, like stealth mode
 appsassin graveyard [-n N] [--json]              # what was killed, newest first
 appsassin revive <n|name>                        # bring a kill back

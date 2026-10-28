@@ -26,6 +26,9 @@ func (m *model) View() string {
 	if m.minimal {
 		return m.minimalView()
 	}
+	if m.everything {
+		return m.allView()
+	}
 	return m.fullView()
 }
 
@@ -74,7 +77,9 @@ func (m *model) emptyLine() string {
 	case m.res == nil:
 		return sDim.Render("casing the joint…")
 	case m.filter != "":
-		return sDim.Render("no targets match “" + m.filter + "”")
+		return sDim.Render("nothing matches “" + m.filter + "”")
+	case m.everything:
+		return sDim.Render("nothing of yours is running?")
 	default:
 		return sOK.Render("✓ all clear") + sDim.Render(" — nothing stray above threshold "+fmt.Sprint(m.threshold))
 	}
@@ -177,11 +182,27 @@ func (m *model) detail(w int, now time.Time) string {
 			cmd = t.Comm
 		}
 		lines[1] = sText.Render(fit(cmd, inner))
-		lines[2] = sDim.Render("why ") + sText.Render(fit(strings.Join(t.Reasons, " · "), inner-4))
+		label := "why "
+		if !t.Stray {
+			label = "info "
+		}
+		lines[2] = sDim.Render(label) + sText.Render(fit(strings.Join(t.Reasons, " · "), inner-len(label)))
 		switch t.Kind {
+		case scan.KindMenu:
+			lines[3] = sDim.Render(t.BundleID + " · menu-bar or background app · x asks it to quit")
+		case scan.KindService:
+			lines[3] = sDim.Render("started by launchd — if it's set to keep alive, it will come right back")
+		case scan.KindProc:
+			what := "x sends SIGTERM, then SIGKILL if it ignores that"
+			if n := len(t.Children); n > 0 {
+				what = fmt.Sprintf("x sends SIGTERM to it and its %d child process%s, then SIGKILL if they ignore it", n, map[bool]string{true: "", false: "es"}[n == 1])
+			}
+			lines[3] = sDim.Render(what)
 		case scan.KindApp:
 			used := "last used " + scan.Human(t.Idle(now)) + " ago"
-			if !t.UsedKnown {
+			if m.res != nil && t.PID == m.res.FrontPID {
+				used = "in front right now"
+			} else if !t.UsedKnown {
 				used = "not seen in front since appsassin started watching"
 			}
 			lines[3] = sDim.Render(fmt.Sprintf("%s · %d windows (%d on screen) · %s", t.BundleID, t.Windows, t.OnScreen, used))
@@ -240,9 +261,15 @@ func (m *model) statusLine(w int) string {
 func key(k, desc string) string { return sKey.Render(k) + " " + sDim.Render(desc) }
 
 func (m *model) helpLine(w int) string {
+	if m.everything {
+		return keyLine(w,
+			key("↑↓", "move"), key("/", "find"), key("x", "kill"), key("K", "force"), key("space", "mark"),
+			key("tab", "strays"), key("s", "sort"), key("g", "graveyard"), key("m", "minimal"), key("?", "help"), key("q", "quit"),
+		)
+	}
 	return keyLine(w,
 		key("↑↓", "move"), key("space", "mark"), key("x", "kill"), key("K", "force"),
-		key("i", "spare"), key("/", "filter"), key("s", "sort"), key("m", "minimal"),
+		key("tab", "everything"), key("/", "filter"), key("s", "sort"), key("i", "spare"), key("m", "minimal"),
 		key("S", "stealth"), key("g", "graveyard"), key("?", "help"), key("q", "quit"),
 	)
 }
@@ -268,6 +295,9 @@ func (m *model) minimalView() string {
 	w := max(30, m.width)
 	var b strings.Builder
 	head := sAccent.Render("appsassin") + sDim.Render(fmt.Sprintf(" %d · %s", len(m.rows), scan.Bytes(m.reclaimable())))
+	if m.everything {
+		head = sAccent.Render("appsassin") + sDim.Render(fmt.Sprintf(" running %d · %s", len(m.rows), scan.Bytes(m.reclaimable())))
+	}
 	b.WriteString(spread(head, m.stealthTag(), w) + "\n")
 
 	h := m.listHeight()
@@ -292,6 +322,13 @@ func (m *model) minimalView() string {
 		if len(t.Reasons) > 0 {
 			why = t.Reasons[0]
 		}
+		if m.everything {
+			score = lipgloss.NewStyle().Foreground(kindColor(t.Kind)).Render(fit(kindShort(t.Kind), 2))
+			why = fmt.Sprintf("%.0f%%", t.CPU)
+			if len(t.Ports) > 0 {
+				why += " · listening " + portsOf(t)
+			}
+		}
 		nameW := max(10, min(28, w/3))
 		row := cur + mark + score + " " + sText.Render(fit(t.Name, nameW)) + " " +
 			sText.Render(fitR(scan.Bytes(t.TreeRSS), 6)) + "  " + sDim.Render(why)
@@ -304,8 +341,127 @@ func (m *model) minimalView() string {
 	if s := m.statusLine(w); s != "" {
 		b.WriteString(s)
 	} else {
-		b.WriteString(keyLine(w, key("x", "kill"), key("space", "mark"), key("g", "graves"), key("m", "full"), key("?", "help"), key("q", "quit")))
+		other := "all"
+		if m.everything {
+			other = "strays"
+		}
+		b.WriteString(keyLine(w, key("x", "kill"), key("/", "find"), key("tab", other), key("g", "graves"), key("m", "full"), key("?", "help"), key("q", "quit")))
 	}
+	return b.String()
+}
+
+// kindShort is a two-letter kind tag for minimal mode.
+func kindShort(k scan.Kind) string {
+	switch k {
+	case scan.KindApp:
+		return "ap"
+	case scan.KindMenu:
+		return "mb"
+	case scan.KindService:
+		return "sv"
+	case scan.KindHelper:
+		return "hp"
+	case scan.KindOrphan:
+		return "or"
+	}
+	return "pr"
+}
+
+func portsOf(t *scan.Target) string {
+	ps := make([]string, len(t.Ports))
+	for i, p := range t.Ports {
+		ps[i] = fmt.Sprintf(":%d", p)
+	}
+	return strings.Join(ps, " ")
+}
+
+// allView lists everything the user is running, so anything can be found and killed.
+func (m *model) allView() string {
+	w := max(40, m.width)
+	now := time.Now()
+	var b strings.Builder
+
+	apps, procs := 0, 0
+	for _, t := range m.rows {
+		if t.Kind.IsApp() {
+			apps++
+		} else {
+			procs++
+		}
+	}
+	left := sBadge.Render("⚔ APPSASSIN") + "  " + sAccent.Render("▤ everything running") +
+		sDim.Render(fmt.Sprintf("  %d app%s · %d process%s · %s", apps, plural(apps), procs,
+			map[bool]string{true: "", false: "es"}[procs == 1], scan.Bytes(m.reclaimable())))
+	right := m.stealthTag()
+	if m.kills > 0 {
+		right = sAccent.Render(fmt.Sprintf("☠ %d", m.kills)) + sDim.Render(" · ") + right
+	}
+	b.WriteString(spread(left, right, w) + "\n")
+	opts := "sort " + m.sort.String() + " · / to find anything by name, pid or port · tab back to strays"
+	if m.filter != "" {
+		opts = "sort " + m.sort.String() + " · filter “" + m.filter + "” · esc clears"
+	}
+	b.WriteString(sFaint.Render(opts) + "\n")
+
+	// Columns: cursor(2) mark(2) name kind(8) cpu(5) mem(6) age(5) info
+	nameW := max(14, min(36, (w-34)*2/5))
+	infoW := max(0, w-34-nameW)
+	b.WriteString(sDim.Render("    "+fit("NAME", nameW)+" "+fit("KIND", 8)+" "+fitR("CPU", 5)+" "+fitR("MEM", 6)+" "+fitR("AGE", 5)+"  "+fit("INFO", infoW)) + "\n")
+
+	h := m.listHeight()
+	m.scroll(h)
+	lines := 0
+	if len(m.rows) == 0 {
+		b.WriteString("  " + m.emptyLine() + "\n")
+		lines++
+	}
+	for i := m.offset; i < len(m.rows) && lines < h; i++ {
+		t := m.rows[i]
+		sel := i == m.cursor
+		on := func(s lipgloss.Style) lipgloss.Style {
+			if sel {
+				return s.Background(rowBg)
+			}
+			return s
+		}
+		sp := on(sText).Render(" ")
+		cur, mark := on(sText).Render("  "), on(sFaint).Render("○ ")
+		if sel {
+			cur = on(sAccent).Render("▸ ")
+		}
+		if m.marked[t.PID] {
+			mark = on(sAccent).Render("◉ ")
+		}
+		name := on(sText).Render(fit(t.Name, nameW))
+		if sel {
+			name = on(sBold).Render(fit(t.Name, nameW))
+		}
+		cpu := on(sDim).Render(fitR(fmt.Sprintf("%.0f%%", t.CPU), 5))
+		if t.CPU >= 25 {
+			cpu = on(lipgloss.NewStyle().Foreground(ember)).Render(fitR(fmt.Sprintf("%.0f%%", t.CPU), 5))
+		}
+		info := on(sDim).Render(fit(strings.Join(t.Reasons, " · "), infoW))
+		if t.Stray && t.Score >= m.threshold {
+			tag := fmt.Sprintf("stray %d · ", t.Score)
+			tw := ansi.StringWidth(tag)
+			info = on(lipgloss.NewStyle().Foreground(scoreColor(t.Score))).Render(fit(tag, min(tw, infoW))) +
+				on(sDim).Render(fit(strings.Join(t.Reasons, " · "), max(0, infoW-tw)))
+		}
+		row := cur + mark + name + sp + on(lipgloss.NewStyle().Foreground(kindColor(t.Kind))).Render(fit(string(t.Kind), 8)) + sp +
+			cpu + sp + on(sText).Render(fitR(scan.Bytes(t.TreeRSS), 6)) + sp + on(sDim).Render(fitR(ageOf(t, now), 5)) + sp + sp + info
+		if pad := w - lipgloss.Width(row); pad > 0 {
+			row += on(sText).Render(strings.Repeat(" ", pad))
+		}
+		b.WriteString(row + "\n")
+		lines++
+	}
+	for ; lines < h; lines++ {
+		b.WriteString("\n")
+	}
+
+	b.WriteString(m.detail(w, now) + "\n")
+	b.WriteString(m.statusLine(w) + "\n")
+	b.WriteString(m.helpLine(w))
 	return b.String()
 }
 
@@ -318,8 +474,9 @@ func (m *model) helpView() string {
 		{"x", "take out marked (or current) — apps are asked to quit politely"},
 		{"K", "force kill (SIGKILL, no save prompts)"},
 		{"i", "spare: add current target to the ignore list forever"},
-		{"/", "filter"},
-		{"s", "cycle sort: score → memory → age → name"},
+		{"tab", "switch between strays and everything running"},
+		{"/", "find (by name, pid, port, path…)"},
+		{"s", "cycle sort: score → memory → age → name → cpu"},
 		{"+ / -", "raise / lower score threshold"},
 		{"A", "show everything with any stray score"},
 		{"m", "toggle minimal mode"},
@@ -436,7 +593,7 @@ func (m *model) graveDetail(w int, now time.Time) string {
 	if e := m.currentGrave(); e != nil {
 		lines[0] = sBold.Render(e.Name) + sDim.Render(fmt.Sprintf("  pid %d · killed %s by %s · score %d · %s",
 			e.PID, killedAgo(*e, now), e.By, e.Score, scan.Bytes(e.Mem)))
-		if e.Kind == scan.KindApp {
+		if e.Kind.IsApp() {
 			lines[1] = sText.Render(fit(e.Bundle, inner))
 			lines[2] = sDim.Render(e.BundleID + " · why " + strings.Join(e.Reasons, " · "))
 		} else {

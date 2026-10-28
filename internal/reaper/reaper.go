@@ -78,7 +78,7 @@ func kill(t *scan.Target, force bool, by string) Result {
 	grave := graveyard.Capture(t, by)
 	r.grave = &grave
 
-	if t.Kind == scan.KindApp && !force {
+	if t.Kind.IsApp() && !force {
 		if !macos.Terminate(t.PID) {
 			r.Msg = "app refused quit request"
 			return r

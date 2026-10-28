@@ -24,8 +24,12 @@ var version = "0.1.0"
 const usage = `appsassin — finds forgotten apps & stray processes and takes them out.
 
 usage:
-  appsassin [-m] [--demo]        interactive hit list (-m / --minimal for compact mode,
+  appsassin [-m] [-e] [--demo]   interactive hit list (-m / --minimal for compact mode,
+                                 -e / --everything to start on everything running,
                                  --demo for made-up targets and simulated kills)
+  appsassin kill <name|pid|:port> [-y] [-f]
+                                 kill anything you're running, e.g. kill slack, kill :3000
+  appsassin ps [--json]          everything you're running: apps, processes, ports
   appsassin list [--all] [--json]
                                  print targets and exit
   appsassin sweep [--dry-run] [--apps] [--threshold N]
@@ -64,10 +68,16 @@ func main() {
 		minimal := fs.Bool("minimal", false, "")
 		fs.BoolVar(minimal, "m", false, "")
 		demo := fs.Bool("demo", false, "")
+		every := fs.Bool("everything", false, "")
+		fs.BoolVar(every, "e", false, "")
 		_ = fs.Parse(args)
-		err = tui.Run(cfg, *minimal, *demo)
+		err = tui.Run(cfg, *minimal, *demo, *every)
 	case "list", "ls":
 		err = list(cfg, args)
+	case "ps":
+		err = ps(cfg, args)
+	case "kill":
+		err = kill(cfg, args)
 	case "sweep":
 		err = sweep(cfg, args)
 	case "graveyard", "graves":

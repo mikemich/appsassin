@@ -60,9 +60,61 @@ func Demo(gone map[int]bool) *Result {
 	}
 	var ts []*Target
 	for _, t := range all {
+		t.Stray, t.TTY = true, "??"
 		if !gone[t.PID] {
 			ts = append(ts, t)
 		}
 	}
 	return &Result{Targets: ts, Scanned: 734, At: now, Took: 142 * time.Millisecond}
+}
+
+// DemoAll is Demo plus the ordinary apps and processes the everything view lists.
+func DemoAll(gone map[int]bool) *Result {
+	r := Demo(gone)
+	now := r.At
+	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+	mb := func(n int64) int64 { return n << 20 }
+	app := func(pid int, name, id, bundle string, mem int64, kids, windows int, started time.Duration, cpu float64, why ...string) *Target {
+		t := &Target{PID: pid, PPID: 1, Kind: KindApp, Name: name, BundleID: id, Bundle: bundle,
+			Comm: bundle + "/Contents/MacOS/" + name, RSS: mem / 2, TreeRSS: mem, Windows: windows, OnScreen: windows,
+			Started: ago(started), LastUsed: ago(time.Minute), UsedKnown: true, CPU: cpu, TTY: "??", Reasons: why}
+		for i := 0; i < kids; i++ {
+			t.Children = append(t.Children, pid+1+i)
+		}
+		return t
+	}
+	others := []*Target{
+		app(812, "Google Chrome", "com.google.Chrome", "/Applications/Google Chrome.app", mb(2380), 23, 3, 30*time.Hour, 6.1, "3 windows"),
+		app(2044, "Visual Studio Code", "com.microsoft.VSCode", "/Applications/Visual Studio Code.app", mb(1610), 14, 2, 9*time.Hour, 3.4, "2 windows"),
+		app(655, "Figma", "com.figma.Desktop", "/Applications/Figma.app", mb(904), 4, 1, 5*time.Hour, 1.2, "1 window"),
+		app(64061, "Terminal", "com.apple.Terminal", "/System/Applications/Utilities/Terminal.app", mb(112), 0, 4, 2*24*time.Hour, 0.8, "in front", "4 windows"),
+		app(901, "Messages", "com.apple.MobileSMS", "/System/Applications/Messages.app", mb(96), 0, 1, 3*24*time.Hour, 0.1, "1 window"),
+		{PID: 733, PPID: 1, Kind: KindMenu, Name: "Raycast", BundleID: "com.raycast.macos", Bundle: "/Applications/Raycast.app",
+			Comm: "/Applications/Raycast.app/Contents/MacOS/Raycast", RSS: mb(188), TreeRSS: mb(212), Children: []int{740},
+			Started: ago(6 * 24 * time.Hour), CPU: 0.3, TTY: "??"},
+		{PID: 741, PPID: 1, Kind: KindMenu, Name: "1Password", BundleID: "com.1password.1password", Bundle: "/Applications/1Password.app",
+			Comm: "/Applications/1Password.app/Contents/MacOS/1Password", RSS: mb(161), TreeRSS: mb(240), Children: []int{750, 751},
+			Started: ago(6 * 24 * time.Hour), CPU: 0.2, TTY: "??"},
+		{PID: 1388, PPID: 1, Kind: KindService, Name: "ollama", Comm: "/opt/homebrew/bin/ollama", Args: "/opt/homebrew/bin/ollama serve",
+			RSS: mb(1290), TreeRSS: mb(1290), Started: ago(4 * 24 * time.Hour), Ports: []int{11434}, CPU: 0, TTY: "??",
+			Reasons: []string{"listening :11434", "launchd job, may restart"}},
+		{PID: 1402, PPID: 1, Kind: KindService, Name: "postgres", Comm: "/opt/homebrew/opt/postgresql@16/bin/postgres",
+			Args: "/opt/homebrew/opt/postgresql@16/bin/postgres -D /opt/homebrew/var/postgresql@16", RSS: mb(38), TreeRSS: mb(77),
+			Children: []int{1403, 1404, 1405}, Started: ago(4 * 24 * time.Hour), Ports: []int{5432}, TTY: "??",
+			Reasons: []string{"listening :5432", "launchd job, may restart"}},
+		{PID: 70122, PPID: 70101, Kind: KindProc, Name: "npm run dev", Comm: "npm run dev", Args: "npm run dev",
+			RSS: mb(64), TreeRSS: mb(318), Children: []int{70130, 70131}, Started: ago(40 * time.Minute), Ports: []int{5174}, CPU: 2.7, TTY: "ttys004",
+			Reasons: []string{"listening :5174", "in terminal ttys004"}},
+		{PID: 70340, PPID: 70301, Kind: KindProc, Name: "cargo watch -x test", Comm: "/Users/you/.cargo/bin/cargo",
+			Args: "cargo watch -x test", RSS: mb(22), TreeRSS: mb(41), Children: []int{70341}, Started: ago(25 * time.Minute), CPU: 41.0, TTY: "ttys006",
+			Reasons: []string{"in terminal ttys006", "busy 41% CPU"}},
+		{PID: 3301, PPID: 1, Kind: KindProc, Name: "Dropbox", Comm: "/Applications/Dropbox.app/Contents/MacOS/Dropbox",
+			RSS: mb(276), TreeRSS: mb(276), Started: ago(6 * 24 * time.Hour), CPU: 0.4, TTY: "??"},
+	}
+	for _, t := range others {
+		if !gone[t.PID] {
+			r.Targets = append(r.Targets, t)
+		}
+	}
+	return r
 }
