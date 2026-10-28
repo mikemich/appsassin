@@ -30,6 +30,7 @@ usage:
   appsassin kill <name|pid|:port> [-y] [-f]
                                  kill anything you're running, e.g. kill slack, kill :3000
   appsassin ps [--json]          everything you're running: apps, processes, ports
+  appsassin runaway [--json]     processes stuck burning CPU or swelling in memory
   appsassin free <amount> [--dry-run] [-y]
                                  kill the most forgotten strays until that much memory
                                  is back, e.g. free 2G
@@ -81,6 +82,8 @@ func main() {
 		err = list(cfg, args)
 	case "ps":
 		err = ps(cfg, args)
+	case "runaway", "runaways":
+		err = runaway(cfg, args)
 	case "kill":
 		err = kill(cfg, args)
 	case "free":
@@ -118,10 +121,12 @@ func list(cfg config.Config, args []string) error {
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	_ = fs.Parse(args)
 
-	res, err := scan.Scan(scan.Options{Config: cfg, Tracker: scan.LoadTracker()})
+	wd := scan.LoadWatchdog()
+	res, err := scan.Scan(scan.Options{Config: cfg, Tracker: scan.LoadTracker(), Watch: wd})
 	if err != nil {
 		return err
 	}
+	_ = wd.Save()
 	var ts []*scan.Target
 	for _, t := range res.Targets {
 		if *all || t.Score >= cfg.Threshold {
@@ -154,7 +159,9 @@ func sweep(cfg config.Config, args []string) error {
 	logf := func(f string, a ...any) { fmt.Printf(f+"\n", a...) }
 	// A one-off sweep has no watch history of its own, so apps only qualify
 	// when the tracker has actually seen them go unused.
-	rs, err := stealth.Sweep(cfg, scan.LoadTracker(), time.Now(), *apps, *dry, "sweep", logf)
+	wd := scan.LoadWatchdog()
+	rs, err := stealth.Sweep(cfg, scan.LoadTracker(), wd, time.Now(), *apps, *dry, "sweep", logf)
+	_ = wd.Save()
 	if err == nil && len(rs) == 0 {
 		fmt.Printf("✓ nothing scores ≥%d — all clear\n", *th)
 	}

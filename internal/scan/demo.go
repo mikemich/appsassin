@@ -58,9 +58,23 @@ func Demo(gone map[int]bool) *Result {
 			Started: ago(5 * 24 * time.Hour), LastUsed: ago(31 * time.Hour), UsedKnown: true,
 			Score: 35, Reasons: []string{"unused 31h", "idle"}},
 	}
-	var ts []*Target
 	for _, t := range all {
 		t.Stray, t.TTY = true, "??"
+	}
+	// Runaways are listed even though their parents are alive.
+	cpu := "runaway: 99% CPU for 14m"
+	mem := "runaway: 6.1G and growing (+1.3G in 10m)"
+	all = append(all,
+		&Target{PID: 70188, PPID: 70150, Kind: KindProc, Name: "node scripts/reindex.js", Comm: "/opt/homebrew/bin/node",
+			Args: "node scripts/reindex.js --all", RSS: mb(84), TreeRSS: mb(84), Started: ago(14 * time.Minute), CPU: 99.4,
+			TTY: "ttys002", Score: 50, Runaway: cpu, Reasons: []string{cpu, "in terminal ttys002"}},
+		&Target{PID: 2071, PPID: 2044, Kind: KindProc, Name: "Code Helper (Plugin)", Bundle: "/Applications/Visual Studio Code.app",
+			Comm: "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)",
+			RSS:  mb(6246), TreeRSS: mb(6246), Started: ago(9 * time.Hour), CPU: 14.2, TTY: "??",
+			Score: 50, Runaway: mem, Reasons: []string{mem}},
+	)
+	var ts []*Target
+	for _, t := range all {
 		if !gone[t.PID] {
 			ts = append(ts, t)
 		}
@@ -85,7 +99,7 @@ func DemoAll(gone map[int]bool) *Result {
 	}
 	others := []*Target{
 		app(812, "Google Chrome", "com.google.Chrome", "/Applications/Google Chrome.app", mb(2380), 23, 3, 30*time.Hour, 6.1, "3 windows"),
-		app(2044, "Visual Studio Code", "com.microsoft.VSCode", "/Applications/Visual Studio Code.app", mb(1610), 14, 2, 9*time.Hour, 3.4, "2 windows"),
+		app(2044, "Visual Studio Code", "com.microsoft.VSCode", "/Applications/Visual Studio Code.app", mb(7856), 14, 2, 9*time.Hour, 3.4, "2 windows"),
 		app(655, "Figma", "com.figma.Desktop", "/Applications/Figma.app", mb(904), 4, 1, 5*time.Hour, 1.2, "1 window"),
 		app(64061, "Terminal", "com.apple.Terminal", "/System/Applications/Utilities/Terminal.app", mb(112), 0, 4, 2*24*time.Hour, 0.8, "in front", "4 windows"),
 		app(901, "Messages", "com.apple.MobileSMS", "/System/Applications/Messages.app", mb(96), 0, 1, 3*24*time.Hour, 0.1, "1 window"),

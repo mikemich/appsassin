@@ -98,6 +98,20 @@ appsassin free 2G              # take it out (asks first)
 
 It picks the most forgotten strays first (highest score, then biggest) until the amount is covered, shows you the list, and asks once. If every stray together holds less than you asked for, it tells you so. It never touches anything that isn't a stray, and `--threshold N` raises the bar.
 
+## Runaways
+
+Some things aren't forgotten, they're stuck: a script spinning at 100% CPU in a terminal tab you're not looking at, or an editor plugin host that keeps swelling. Their parent is usually alive, so they aren't strays, but appsassin catches them anyway.
+
+A **runaway** is a process that stays at **≥90% CPU for 10 minutes**, or stays **over 4 GB and keeps growing** for 10 minutes. One sample is noise, so appsassin keeps a short usage history for each process (the app samples every 3s, stealth mode every 20s) and measures CPU from the CPU time actually used between samples. Brief dips under 30s don't reset the clock. A process that has burned a core since it started is caught on first sight.
+
+Runaways show up in the hit list, the everything view and `appsassin ps` with a reason such as `runaway: 98% CPU for 14m` or `runaway: 6.1G and growing (+1.3G in 10m)`. A runaway inside an app (say, a VS Code helper) gets its own row so you can kill just that process.
+
+```bash
+appsassin runaway              # what's stuck right now (--json)
+```
+
+Builds and encodes are expected to run hot: `ffmpeg`, `cargo`, `rustc`, `xcodebuild`, `swift-frontend`, `clang`, `make` and `ninja` are on the runaway ignore list, along with anything they start. By default runaways are only flagged. Set `"kill": true` in the `runaway` [config](#config) to let stealth mode kill them.
+
 ## Graveyard
 
 Every kill goes to the graveyard, whether you made it in the app, with `appsassin sweep`, or stealth mode made it while you weren't looking. appsassin records the full command line, its working directory, ports, and the bundle ID for apps. Bringing something back takes one command:
@@ -143,6 +157,7 @@ Stealth mode is deliberately conservative:
 
 - **Nothing it kills is lost.** Every kill lands in the [graveyard](#graveyard), and `appsassin revive <name>` brings it back. A process you revive is never killed again by stealth mode.
 - It only acts on targets scoring **≥ 70**.
+- It leaves [runaways](#runaways) alone unless you set `runaway.kill`. With it on, it kills a runaway once it has been over the line for the whole `for` time, never launchd jobs (they'd be restarted) or the app in front.
 - It kills orphans and leftover helpers outright.
 - **Apps are only ever asked to quit**, never force-killed. An app with unsaved changes stays open, and stealth mode logs it.
 - An app qualifies only if it has **no windows** and stealth mode **actually watched it go unused for 6 hours**. Having been open for a long time isn't enough.
@@ -162,8 +177,9 @@ Stealth mode is deliberately conservative:
 | Idle: under 0.5% CPU over its whole lifetime | +10 |
 | Running for >2h / >24h / >7d | +5 / +10 / +15 |
 | Holding >150 MB / >500 MB / >2 GB (whole process tree) | +5 / +10 / +20 |
+| [Runaway](#runaways): ≥90% CPU, or over 4 GB and growing, for 10 min (listed even if it isn't a stray) | +50 |
 | App visible on screen | −15 |
-| Busy right now (≥25% CPU) | −20 |
+| Busy right now (≥25% CPU), unless it's a runaway | −20 |
 
 ## What it will never touch
 
@@ -173,7 +189,7 @@ It never kills these, not even when you ask:
 - App extensions (`.appex`) and XPC services
 - appsassin itself, the shell and terminal app it's running in, and Finder, Dock and Control Center
 
-The stray hunt and stealth mode never flag these either. You can still kill them yourself from the everything view or with `appsassin kill`:
+The stray hunt never flags these as strays, and stealth mode leaves them alone. You can still kill them yourself from the everything view or with `appsassin kill`. A process here that becomes a [runaway](#runaways) is still flagged as one, and stealth mode kills it only if you set `runaway.kill` (never a launchd job or the app in front):
 
 - launchd-managed jobs
 - Processes attached to a terminal
@@ -203,6 +219,7 @@ It needs **no Accessibility, Screen Recording, Automation or admin permissions**
 ```bash
 appsassin kill <name|pid|:port> [-y] [-f]       # kill anything you're running
 appsassin ps [--json]                            # everything you're running
+appsassin runaway [--json]                       # processes stuck burning CPU or swelling in memory
 appsassin free <amount> [--dry-run] [-y]         # kill the most forgotten strays until that much memory is back
 appsassin undo [-y]                              # revive the last batch of kills
 appsassin list [--all] [--json]                  # print stray targets, scriptable
@@ -221,11 +238,15 @@ appsassin config                                 # where the config lives and wh
   "threshold": 30,
   "minimal": false,
   "ignore": ["tmux", "screen", "zellij", "ssh-agent", "gpg-agent", "mosh-server"],
-  "stealth": { "interval": "5m", "threshold": 70, "apps": true, "appIdle": "6h", "dryRun": false, "notify": false }
+  "stealth": { "interval": "5m", "threshold": 70, "apps": true, "appIdle": "6h", "dryRun": false, "notify": false },
+  "runaway": {
+    "cpu": 90, "for": "10m", "memory": "4G", "kill": false,
+    "ignore": ["ffmpeg", "cargo", "rustc", "xcodebuild", "swift-frontend", "clang", "make", "ninja"]
+  }
 }
 ```
 
-Ignore entries match the name, executable, bundle ID or path, and can use globs such as `com.jetbrains.*`.
+Ignore entries match the name, executable, bundle ID or path, and can use globs such as `com.jetbrains.*`. Set `runaway.cpu` to `0` or `runaway.memory` to `""` to turn either check off.
 
 ## Build from source
 

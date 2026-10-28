@@ -56,7 +56,8 @@ type Target struct {
 	UsedKnown bool      // LastUsed was observed rather than assumed from launch time
 	TTY       string
 	Score     int
-	Stray     bool // looks forgotten; false for things listed only by Options.Everything
+	Stray     bool   // looks forgotten; false for things listed only by Options.Everything
+	Runaway   string // why it counts as a runaway (stuck burning CPU or swelling), if it does
 	Reasons   []string
 }
 
@@ -82,7 +83,8 @@ type Result struct {
 
 type Options struct {
 	Config  config.Config
-	Tracker *Tracker // optional
+	Tracker *Tracker  // optional
+	Watch   *Watchdog // optional; without it nothing is a runaway
 
 	// Everything also lists apps and processes that aren't strays, so anything
 	// the user runs can be found and killed. Strays keep their scores.
@@ -251,6 +253,12 @@ func Scan(opt Options) (*Result, error) {
 		}
 	}
 
+	rule := opt.Config.Runaway
+	watch := opt.Watch != nil && rule.Enabled()
+	if watch {
+		opt.Watch.Observe(mine(procs), now, rule)
+	}
+
 	var targets []*Target
 	for _, p := range procs {
 		if p.UID != me || p.PID <= 1 || protected[p.PID] || strings.Contains(p.Stat, "Z") {
@@ -364,14 +372,23 @@ func Scan(opt Options) (*Result, error) {
 			}
 		}
 
-		if t.Stray && opt.Config.Ignored(t.Name, p.Comm, t.BundleID, t.Bundle) {
+		ignored := opt.Config.Ignored(t.Name, p.Comm, t.BundleID, t.Bundle)
+		if t.Stray && ignored {
 			t.Stray, t.Reasons = false, []string{"spared (ignore list)"}
 		}
+		if watch && !ignored && !runawaySpared(rule, procs, p, t.Name, t.BundleID, t.Bundle) {
+			t.Runaway = opt.Watch.Check(p, now, rule).Reason()
+		}
 		if !t.Stray {
-			if !opt.Everything {
+			// Runaways are hunted even when their parent is alive and well.
+			if t.Runaway == "" && !opt.Everything {
 				continue
 			}
 			describe(t, p, jobs[p.PID])
+			if t.Runaway != "" {
+				t.Score = runawayPts
+				t.Reasons = append([]string{t.Runaway}, t.Reasons...)
+			}
 			targets = append(targets, t)
 			continue
 		}
@@ -380,6 +397,8 @@ func Scan(opt Options) (*Result, error) {
 			add(10, "listening "+portList(t.Ports))
 		}
 		switch {
+		case t.Runaway != "":
+			add(runawayPts, "")
 		case p.CPU >= 25:
 			add(-20, fmt.Sprintf("busy %.0f%% CPU", p.CPU))
 		case p.CPU < 0.5 && p.CPUTime < p.Elapsed/200: // <0.5% CPU over its whole life
@@ -394,6 +413,9 @@ func Scan(opt Options) (*Result, error) {
 			case p.Elapsed > 2*time.Hour:
 				add(5, "")
 			}
+		}
+		if t.Runaway != "" {
+			t.Reasons = append([]string{t.Runaway}, t.Reasons...)
 		}
 		t.Score = score
 		targets = append(targets, t)
@@ -428,7 +450,8 @@ func Scan(opt Options) (*Result, error) {
 				break
 			}
 		}
-		if covered {
+		// A runaway gets its own row rather than hiding inside its app's.
+		if covered && t.Runaway == "" {
 			if opt.Everything {
 				descend(t) // still findable by PID or port, e.g. by `appsassin kill`
 			}
@@ -508,7 +531,7 @@ func describe(t *Target, p *Proc, launchdJob bool) {
 	if launchdJob && !t.Kind.IsApp() {
 		add("launchd job, may restart")
 	}
-	if p.CPU >= 25 {
+	if p.CPU >= 25 && t.Runaway == "" {
 		add(fmt.Sprintf("busy %.0f%% CPU", p.CPU))
 	}
 }

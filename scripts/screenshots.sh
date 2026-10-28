@@ -47,7 +47,7 @@ keys r; gif 2.4
 keys g; gif 1.2
 # Everything running: tab over, find a dev server by port, kill it.
 keys Tab; gif 2.0
-for _ in 1 2 3 4 5 6; do PAUSE=0.05 keys Down; done
+for _ in 1 2 3 4 5 6 7; do PAUSE=0.05 keys Down; done
 sleep 6 # let the status line clear
 grab everything && render everything docs/everything.png
 keys /; keys ':5174'; keys Enter; gif 1.8
@@ -81,7 +81,7 @@ ${G}◉${R} running (pid 81244)
   at login: true
   log: ~/Library/Logs/appsassin.log
 ${P}appsassin stealth log -n 5
-${D}Oct 19 09:00:12${R}  stealth mode engaged: sweep every 5m0s, threshold 70
+${D}Oct 19 09:00:12${R}  stealth mode engaged: sweep every 5m0s, threshold 70, flags runaways (≥90% CPU or ≥4G and growing, for 10m) without killing them
 ${D}Oct 19 09:05:13${R}  killed orphan pid=48213 "next dev" score=97 mem=694M why=[orphaned (parent exited), dev runtime, listening :3000] (terminated)
 ${D}Oct 19 09:05:13${R}  killed helper pid=31877 "Slack Helper (Renderer)" score=85 mem=388M why=[outlived Slack, idle] (terminated)
 ${D}Oct 19 15:10:41${R}  killed app pid=1450 "Spotify" score=85 mem=611M why=[no windows, unused 6h, idle] (quit)

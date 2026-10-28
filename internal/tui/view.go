@@ -151,7 +151,7 @@ func (m *model) fullView() string {
 		kind := on(lipgloss.NewStyle().Foreground(kindColor(t.Kind))).Render(fit(string(t.Kind), 7))
 		row := cur + mark + score + sp + bar(t.Score, on) + sp + name + sp + kind + sp +
 			on(sText).Render(fitR(scan.Bytes(t.TreeRSS), 6)) + sp + on(sDim).Render(fitR(ageOf(t, now), 5)) + sp + sp +
-			on(sDim).Render(fit(strings.Join(t.Reasons, " · "), whyW))
+			why(t, whyW, on)
 		if pad := w - lipgloss.Width(row); pad > 0 {
 			row += on(sText).Render(strings.Repeat(" ", pad))
 		}
@@ -211,6 +211,9 @@ func (m *model) detail(w int, now time.Time) string {
 		default:
 			lines[3] = sDim.Render("parent process is gone; adopted by launchd and nobody is watching it")
 		}
+		if t.Runaway != "" {
+			lines[3] = m.runawayLine(t)
+		}
 	} else {
 		lines[0] = sDim.Render("no target selected")
 	}
@@ -218,6 +221,36 @@ func (m *model) detail(w int, now time.Time) string {
 		lines[i] = ansi.Truncate(l, inner, "…")
 	}
 	return sBox.Width(w - 2).Render(strings.Join(lines, "\n"))
+}
+
+// runawayLine says what makes t a runaway and what stealth mode will do about it.
+func (m *model) runawayLine(t *scan.Target) string {
+	r := m.cfg.Runaway
+	what := "stealth mode won't kill it (runaway.kill is off)"
+	switch {
+	case t.Kind == scan.KindService:
+		what = "a launchd job, so stealth mode won't kill it (launchd would restart it)"
+	case m.res != nil && t.PID == m.res.FrontPID:
+		what = "in front, so stealth mode won't touch it"
+	case r.Kill && t.Kind.IsApp():
+		what = "stealth mode will ask it to quit"
+	case r.Kill:
+		what = "stealth mode will kill it"
+	}
+	return sRunaway.Render("runaway") + sDim.Render(" · "+r.Describe()+" · "+what)
+}
+
+// why renders t's reasons in w cells, with a runaway's reason picked out.
+func why(t *scan.Target, w int, on func(lipgloss.Style) lipgloss.Style) string {
+	if t.Runaway == "" || len(t.Reasons) == 0 || t.Reasons[0] != t.Runaway {
+		return on(sDim).Render(fit(strings.Join(t.Reasons, " · "), w))
+	}
+	hw := min(ansi.StringWidth(t.Runaway), w)
+	rest := strings.Join(t.Reasons[1:], " · ")
+	if rest != "" {
+		rest = " · " + rest
+	}
+	return on(sRunaway).Render(fit(t.Runaway, hw)) + on(sDim).Render(fit(rest, w-hw))
 }
 
 func (m *model) statusLine(w int) string {
@@ -241,6 +274,9 @@ func (m *model) statusLine(w int) string {
 		apps := ""
 		if st.Apps {
 			apps = ", quits windowless apps unused " + scan.Human(st.AppIdleDur())
+		}
+		if r := m.cfg.Runaway; r.Kill && r.Enabled() {
+			apps += ", and runaways"
 		}
 		return sConfirm.Render("Engage stealth mode?") + sDim.Render(fmt.Sprintf(
 			" y / n · silently kills strays ≥%d every %s%s", st.Threshold, scan.Human(st.IntervalDur()), apps))
@@ -329,9 +365,13 @@ func (m *model) minimalView() string {
 				why += " · listening " + portsOf(t)
 			}
 		}
+		whyS := sDim
+		if t.Runaway != "" {
+			why, whyS = t.Runaway, sRunaway
+		}
 		nameW := max(10, min(28, w/3))
 		row := cur + mark + score + " " + sText.Render(fit(t.Name, nameW)) + " " +
-			sText.Render(fitR(scan.Bytes(t.TreeRSS), 6)) + "  " + sDim.Render(why)
+			sText.Render(fitR(scan.Bytes(t.TreeRSS), 6)) + "  " + whyS.Render(why)
 		b.WriteString(ansi.Truncate(row, w, "…") + "\n")
 		lines++
 	}
@@ -440,12 +480,12 @@ func (m *model) allView() string {
 		if t.CPU >= 25 {
 			cpu = on(lipgloss.NewStyle().Foreground(ember)).Render(fitR(fmt.Sprintf("%.0f%%", t.CPU), 5))
 		}
-		info := on(sDim).Render(fit(strings.Join(t.Reasons, " · "), infoW))
+		info := why(t, infoW, on)
 		if t.Stray && t.Score >= m.threshold {
 			tag := fmt.Sprintf("stray %d · ", t.Score)
 			tw := ansi.StringWidth(tag)
 			info = on(lipgloss.NewStyle().Foreground(scoreColor(t.Score))).Render(fit(tag, min(tw, infoW))) +
-				on(sDim).Render(fit(strings.Join(t.Reasons, " · "), max(0, infoW-tw)))
+				why(t, max(0, infoW-tw), on)
 		}
 		row := cur + mark + name + sp + on(lipgloss.NewStyle().Foreground(kindColor(t.Kind))).Render(fit(string(t.Kind), 8)) + sp +
 			cpu + sp + on(sText).Render(fitR(scan.Bytes(t.TreeRSS), 6)) + sp + on(sDim).Render(fitR(ageOf(t, now), 5)) + sp + sp + info
@@ -492,7 +532,9 @@ func (m *model) helpView() string {
 		b.WriteString("  " + sKey.Render(fit(r[0], 12)) + sDim.Render(r[1]) + "\n")
 	}
 	b.WriteString("\n" + sDim.Render("  Scores: orphaned processes, helpers that outlived their app, and windowless") + "\n")
-	b.WriteString(sDim.Render("  apps nobody has touched rank highest. Busy processes rank lower.") + "\n\n")
+	b.WriteString(sDim.Render("  apps nobody has touched rank highest. Busy processes rank lower, unless") + "\n")
+	b.WriteString(sDim.Render("  they're runaways: "+m.cfg.Runaway.Describe()+". Those are listed even") + "\n")
+	b.WriteString(sDim.Render("  when their parent is alive, and stealth mode kills them only with runaway.kill on.") + "\n\n")
 	b.WriteString(sFaint.Render("  any key to return"))
 	return b.String()
 }

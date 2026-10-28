@@ -31,6 +31,7 @@ var (
 	sErr     = lipgloss.NewStyle().Foreground(crimson)
 	sKey     = lipgloss.NewStyle().Foreground(text).Bold(true)
 	sConfirm = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(crimson).Padding(0, 1)
+	sRunaway = lipgloss.NewStyle().Foreground(ember).Bold(true)
 	sBox     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(faint).Padding(0, 1)
 )
 

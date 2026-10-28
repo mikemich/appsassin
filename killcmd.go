@@ -19,8 +19,15 @@ import (
 	"github.com/mikemich/appsassin/internal/scan"
 )
 
+// everything scans all the user runs, adding to the shared usage history so
+// back-to-back commands can tell a runaway from a busy moment.
 func everything(cfg config.Config) (*scan.Result, error) {
-	return scan.Scan(scan.Options{Config: cfg, Tracker: scan.LoadTracker(), Everything: true})
+	wd := scan.LoadWatchdog()
+	res, err := scan.Scan(scan.Options{Config: cfg, Tracker: scan.LoadTracker(), Watch: wd, Everything: true})
+	if err == nil {
+		_ = wd.Save()
+	}
+	return res, err
 }
 
 func ports(t *scan.Target) string {
@@ -32,11 +39,17 @@ func ports(t *scan.Target) string {
 }
 
 func row(t *scan.Target) string {
-	extra := ports(t)
+	var extra []string
 	if t.Stray {
-		extra = strings.TrimSpace(fmt.Sprintf("stray %d %s", t.Score, extra))
+		extra = append(extra, fmt.Sprintf("stray %d", t.Score))
 	}
-	return fmt.Sprintf("%-8s %7d  %-34.34s %5.1f%% %6s  %s", t.Kind, t.PID, t.Name, t.CPU, scan.Bytes(t.TreeRSS), extra)
+	if t.Runaway != "" {
+		extra = append(extra, t.Runaway)
+	}
+	if p := ports(t); p != "" {
+		extra = append(extra, p)
+	}
+	return fmt.Sprintf("%-8s %7d  %-34.34s %5.1f%% %6s  %s", t.Kind, t.PID, t.Name, t.CPU, scan.Bytes(t.TreeRSS), strings.Join(extra, " · "))
 }
 
 // ps lists everything the user is running.
@@ -55,7 +68,7 @@ func ps(cfg config.Config, args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(ts)
 	}
-	fmt.Printf("%-8s %7s  %-34s %6s %6s  %s\n", "KIND", "PID", "NAME", "CPU", "MEM", "PORTS / STRAY")
+	fmt.Printf("%-8s %7s  %-34s %6s %6s  %s\n", "KIND", "PID", "NAME", "CPU", "MEM", "PORTS / STRAY / RUNAWAY")
 	for _, t := range ts {
 		fmt.Println(row(t))
 	}
@@ -199,6 +212,52 @@ func kill(cfg config.Config, args []string) error {
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d not killed", failed, len(picked))
+	}
+	return nil
+}
+
+// runaway lists processes stuck over the runaway line, stray or not.
+func runaway(cfg config.Config, args []string) error {
+	fs := flag.NewFlagSet("runaway", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	_ = fs.Parse(args)
+	r := cfg.Runaway
+	if !r.Enabled() {
+		return errors.New("the runaway watchdog is off (set runaway.cpu or runaway.memory in " + config.Path() + ")")
+	}
+	tracked := scan.LoadWatchdog().Seen()
+	res, err := everything(cfg)
+	if err != nil {
+		return err
+	}
+	ts := []*scan.Target{}
+	for _, t := range res.All {
+		if t.Runaway != "" {
+			ts = append(ts, t)
+		}
+	}
+	sort.Slice(ts, func(i, j int) bool { return ts[i].CPU > ts[j].CPU })
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(ts)
+	}
+
+	verdict := "stealth mode flags them but doesn't kill them (runaway.kill is off)"
+	if r.Kill {
+		verdict = "stealth mode kills them (runaway.kill is on)"
+	}
+	if len(ts) == 0 {
+		fmt.Printf("✓ no runaways (%s)\n", r.Describe())
+	} else {
+		for _, t := range ts {
+			fmt.Printf("%-8s %7d  %-34.34s %5.1f%% %6s  %s\n", t.Kind, t.PID, t.Name, t.CPU, scan.Bytes(t.RSS), t.Runaway)
+		}
+		fmt.Printf("\nrunaway = %s · %s\nkill one: appsassin kill <pid>\n", r.Describe(), verdict)
+	}
+	if !tracked {
+		fmt.Println("\nNo usage history yet, so only processes that have run hot their whole life show up.\n" +
+			"Keep the app or stealth mode running (or run this again later) to catch the rest.")
 	}
 	return nil
 }

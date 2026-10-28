@@ -67,8 +67,10 @@ type (
 )
 
 type model struct {
-	cfg     config.Config
-	tracker *scan.Tracker
+	cfg       config.Config
+	tracker   *scan.Tracker
+	watch     *scan.Watchdog
+	watchSave time.Time // when usage history was last written for other appsassin processes
 
 	res      *scan.Result
 	rows     []*scan.Target
@@ -133,11 +135,13 @@ func Run(cfg config.Config, minimal, demo, everything bool) error {
 		m.threshold = 30
 		m.graves = graveyard.Demo(time.Now())
 	} else {
+		m.watch = scan.LoadWatchdog()
 		m.stealthPID, m.stealthOn = stealth.Running()
 	}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if !demo {
 		_ = m.tracker.Save()
+		_ = m.watch.Save()
 	}
 	return err
 }
@@ -163,9 +167,16 @@ func (m *model) scanCmd() tea.Cmd {
 		}
 		return func() tea.Msg { return scanMsg{scan.Demo(gone), nil, all} }
 	}
+	wd, save := m.watch, time.Since(m.watchSave) >= 15*time.Second
+	if save {
+		m.watchSave = time.Now()
+	}
 	return func() tea.Msg {
-		r, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr, Everything: all})
+		r, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr, Watch: wd, Everything: all})
 		_ = tr.Save()
+		if save {
+			_ = wd.Save()
+		}
 		return scanMsg{r, err, all}
 	}
 }

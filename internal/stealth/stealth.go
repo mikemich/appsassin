@@ -149,7 +149,13 @@ func Uninstall() error {
 // watchedSince is when continuous app-usage tracking began; an app is only
 // eligible once it was actually seen going unused, never just assumed idle
 // because it launched long ago.
+//
+// Runaways go by the runaway rules alone, whatever their score: only with
+// runaway.kill on, and never launchd jobs, which would just be restarted.
 func Eligible(t *scan.Target, cfg config.Config, now, watchedSince time.Time, apps bool) bool {
+	if t.Runaway != "" {
+		return cfg.Runaway.Kill && t.Kind != scan.KindService
+	}
 	if t.Score < cfg.Stealth.Threshold {
 		return false
 	}
@@ -166,16 +172,28 @@ func Eligible(t *scan.Target, cfg config.Config, now, watchedSince time.Time, ap
 
 // Sweep runs one unattended pass. Apps are only ever asked to quit politely.
 // Kills go to the graveyard credited to by. Anything revived from the
-// graveyard is left alone.
-func Sweep(cfg config.Config, tr *scan.Tracker, watchedSince time.Time, apps, dryRun bool, by string, logf func(string, ...any)) ([]reaper.Result, error) {
-	res, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr})
+// graveyard is left alone, and so is the app in front. wd may be nil, in
+// which case nothing counts as a runaway.
+func Sweep(cfg config.Config, tr *scan.Tracker, wd *scan.Watchdog, watchedSince time.Time, apps, dryRun bool, by string, logf func(string, ...any)) ([]reaper.Result, error) {
+	return sweep(cfg, tr, wd, watchedSince, apps, dryRun, by, logf, nil)
+}
+
+// SweepRunaways is a pass that only takes out runaways, for when the
+// watchdog spots one between sweeps.
+func SweepRunaways(cfg config.Config, tr *scan.Tracker, wd *scan.Watchdog, dryRun bool, by string, logf func(string, ...any)) ([]reaper.Result, error) {
+	return sweep(cfg, tr, wd, time.Now(), false, dryRun, by, logf, func(t *scan.Target) bool { return t.Runaway != "" })
+}
+
+func sweep(cfg config.Config, tr *scan.Tracker, wd *scan.Watchdog, watchedSince time.Time, apps, dryRun bool, by string,
+	logf func(string, ...any), only func(*scan.Target) bool) ([]reaper.Result, error) {
+	res, err := scan.Scan(scan.Options{Config: cfg, Tracker: tr, Watch: wd})
 	if err != nil {
 		return nil, err
 	}
 	revived := graveyard.Revived()
 	var out []reaper.Result
 	for _, t := range res.Targets {
-		if !Eligible(t, cfg, res.At, watchedSince, apps) {
+		if (only != nil && !only(t)) || t.PID == res.FrontPID || !Eligible(t, cfg, res.At, watchedSince, apps) {
 			continue
 		}
 		if at, ok := revived[t.PID]; ok && !t.Started.Before(at.Add(-time.Minute)) {
@@ -183,6 +201,9 @@ func Sweep(cfg config.Config, tr *scan.Tracker, watchedSince time.Time, apps, dr
 		}
 		desc := fmt.Sprintf("%s pid=%d %q score=%d mem=%s why=[%s]",
 			t.Kind, t.PID, t.Name, t.Score, scan.Bytes(t.TreeRSS), strings.Join(t.Reasons, ", "))
+		if t.Runaway != "" {
+			desc = "runaway " + desc
+		}
 		if dryRun {
 			logf("would kill %s", desc)
 			out = append(out, reaper.Result{Target: t, OK: true, Msg: "dry run"})
@@ -253,12 +274,14 @@ func Run(dryRun bool) error {
 
 	cfg := config.Load()
 	tr := scan.LoadTracker()
+	wd := scan.LoadWatchdog()
 	started := time.Now()
 	mode := ""
 	if dryRun || cfg.Stealth.DryRun {
 		mode = " (dry run)"
 	}
-	logf("stealth mode engaged%s: sweep every %s, threshold %d", mode, cfg.Stealth.IntervalDur(), cfg.Stealth.Threshold)
+	logf("stealth mode engaged%s: sweep every %s, threshold %d%s", mode, cfg.Stealth.IntervalDur(), cfg.Stealth.Threshold, runawayNote(cfg.Runaway))
+	passed := map[int]bool{} // runaways the last runaway pass left alone (ignored, the front app, failed)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -270,6 +293,7 @@ func Run(dryRun bool) error {
 		select {
 		case <-sigs:
 			_ = tr.Save()
+			_ = wd.Save()
 			logf("stealth mode disengaged")
 			return nil
 		case now := <-watch.C:
@@ -278,11 +302,38 @@ func Run(dryRun bool) error {
 					tr.Touch(info.BundlePath, now)
 				}
 			}
+			cfg = config.Load() // pick up edits without a restart
+			// Sample usage on every wake, so a runaway is caught soon after it
+			// has been over the line long enough, not at the next sweep.
+			if cfg.Runaway.Enabled() {
+				pids, err := wd.Sample(now, cfg.Runaway)
+				if err != nil {
+					logf("watchdog error: %v", err)
+				}
+				fresh := false
+				cur := map[int]bool{}
+				for _, pid := range pids {
+					cur[pid] = true
+					fresh = fresh || !passed[pid]
+				}
+				passed = cur
+				if fresh && cfg.Runaway.Kill {
+					rs, err := SweepRunaways(cfg, tr, wd, dryRun || cfg.Stealth.DryRun, "stealth", logf)
+					if err != nil {
+						logf("runaway sweep error: %v", err)
+					}
+					if cfg.Stealth.Notify && !dryRun && !cfg.Stealth.DryRun {
+						if err := notify(rs); err != nil {
+							logf("notification failed: %v", err)
+						}
+					}
+				}
+				_ = wd.Save()
+			}
 			if now.Before(nextSweep) {
 				continue
 			}
-			cfg = config.Load() // pick up edits without a restart
-			rs, err := Sweep(cfg, tr, started, cfg.Stealth.Apps, dryRun || cfg.Stealth.DryRun, "stealth", logf)
+			rs, err := Sweep(cfg, tr, wd, started, cfg.Stealth.Apps, dryRun || cfg.Stealth.DryRun, "stealth", logf)
 			if err != nil {
 				logf("sweep error: %v", err)
 			}
@@ -292,7 +343,18 @@ func Run(dryRun bool) error {
 				}
 			}
 			_ = tr.Save()
+			_ = wd.Save()
 			nextSweep = now.Add(cfg.Stealth.IntervalDur())
 		}
 	}
+}
+
+func runawayNote(r config.Runaway) string {
+	switch {
+	case !r.Enabled():
+		return ", runaway watchdog off"
+	case r.Kill:
+		return ", kills runaways (" + r.Describe() + ")"
+	}
+	return ", flags runaways (" + r.Describe() + ") without killing them"
 }

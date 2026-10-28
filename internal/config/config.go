@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,11 +20,22 @@ type Stealth struct {
 	Notify    bool   `json:"notify"`    // post a notification after each sweep that killed something
 }
 
+// Runaway decides when a process counts as stuck: burning CPU or swelling in
+// memory for a sustained stretch, whether or not its parent is alive.
+type Runaway struct {
+	CPU    float64  `json:"cpu"`    // % of one core; 0 turns the CPU check off
+	For    string   `json:"for"`    // how long it must stay over the line, e.g. "10m"
+	Memory string   `json:"memory"` // resident size that counts when still growing, e.g. "4G"; "" turns it off
+	Kill   bool     `json:"kill"`   // let stealth mode kill runaways
+	Ignore []string `json:"ignore"` // never runaways, nor anything they started (builds, encodes)
+}
+
 type Config struct {
 	Threshold int      `json:"threshold"` // minimum score shown in the TUI
 	Minimal   bool     `json:"minimal"`   // start the TUI in minimal mode
 	Ignore    []string `json:"ignore"`    // names, bundle IDs, exe paths or globs never touched
 	Stealth   Stealth  `json:"stealth"`
+	Runaway   Runaway  `json:"runaway"`
 }
 
 func Default() Config {
@@ -35,6 +47,12 @@ func Default() Config {
 			Threshold: 70,
 			Apps:      true,
 			AppIdle:   "6h",
+		},
+		Runaway: Runaway{
+			CPU:    90,
+			For:    "10m",
+			Memory: "4G",
+			Ignore: []string{"ffmpeg", "cargo", "rustc", "xcodebuild", "swift-frontend", "clang", "make", "ninja"},
 		},
 	}
 }
@@ -81,8 +99,14 @@ func (c Config) Save() error {
 // Ignored reports whether any of the identifiers match the ignore list.
 // Entries match case-insensitively against the display name, executable
 // basename, bundle ID or full path, and may use shell globs.
-func (c Config) Ignored(ids ...string) bool {
-	for _, pat := range c.Ignore {
+func (c Config) Ignored(ids ...string) bool { return matches(c.Ignore, ids) }
+
+// Ignored reports whether the identifiers match the runaway ignore list,
+// with the same rules as Config.Ignored.
+func (r Runaway) Ignored(ids ...string) bool { return matches(r.Ignore, ids) }
+
+func matches(list, ids []string) bool {
+	for _, pat := range list {
 		p := strings.ToLower(strings.TrimSpace(pat))
 		if p == "" {
 			continue
@@ -123,3 +147,45 @@ func dur(s string, def time.Duration) time.Duration {
 
 func (s Stealth) IntervalDur() time.Duration { return dur(s.Interval, 5*time.Minute) }
 func (s Stealth) AppIdleDur() time.Duration  { return dur(s.AppIdle, 6*time.Hour) }
+
+func (r Runaway) ForDur() time.Duration { return dur(r.For, 10*time.Minute) }
+
+// MemoryBytes parses Memory ("4G", "512M", "1.5GB", plain bytes); 0 means off.
+func (r Runaway) MemoryBytes() int64 {
+	s := strings.ToUpper(strings.TrimSpace(r.Memory))
+	s = strings.TrimSuffix(strings.TrimSuffix(s, "B"), "I")
+	mult := 1.0
+	if n := len(s); n > 0 {
+		if i := strings.IndexByte("KMGT", s[n-1]); i >= 0 {
+			mult = float64(int64(1) << (10 * (i + 1)))
+			s = s[:n-1]
+		}
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return int64(v * mult)
+}
+
+// Enabled reports whether either runaway check is on.
+func (r Runaway) Enabled() bool { return r.CPU > 0 || r.MemoryBytes() > 0 }
+
+// Describe sums the rule up, e.g. "≥90% CPU or ≥4G and growing, for 10m".
+func (r Runaway) Describe() string {
+	var parts []string
+	if r.CPU > 0 {
+		parts = append(parts, strconv.FormatFloat(r.CPU, 'f', -1, 64)+"% CPU")
+	}
+	if r.MemoryBytes() > 0 {
+		parts = append(parts, strings.TrimSpace(r.Memory)+" and growing")
+	}
+	if len(parts) == 0 {
+		return "off"
+	}
+	f := r.For
+	if _, err := time.ParseDuration(f); err != nil {
+		f = r.ForDur().String()
+	}
+	return "≥" + strings.Join(parts, " or ≥") + ", for " + f
+}
