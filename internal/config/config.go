@@ -33,6 +33,7 @@ type Runaway struct {
 type Config struct {
 	Threshold int      `json:"threshold"` // minimum score shown in the TUI
 	Minimal   bool     `json:"minimal"`   // start the TUI in minimal mode
+	Animation bool     `json:"animation"` // play the short boot animation
 	Ignore    []string `json:"ignore"`    // names, bundle IDs, exe paths or globs never touched
 	Stealth   Stealth  `json:"stealth"`
 	Runaway   Runaway  `json:"runaway"`
@@ -41,6 +42,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Threshold: 30,
+		Animation: true,
 		Ignore:    []string{"tmux", "screen", "zellij", "ssh-agent", "gpg-agent", "mosh-server"},
 		Stealth: Stealth{
 			Interval:  "5m",

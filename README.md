@@ -44,6 +44,8 @@ go install github.com/mikemich/appsassin@latest
 
 Then run `appsassin`. To look around first without risk, run `appsassin --demo`. Demo mode shows made-up targets, and kills are simulated.
 
+It opens with a short animation that plays while the first scan runs, so it doesn't slow anything down. Any key skips it. `--no-anim` (or `"animation": false` in the config) turns it off, and minimal mode never plays it.
+
 ## Why
 
 Activity Monitor lists **everything**: about 700 processes, mostly macOS internals. `kill` needs a PID you have to dig up first. Neither knows which processes you *forgot about*.
@@ -237,6 +239,7 @@ appsassin config                                 # where the config lives and wh
 {
   "threshold": 30,
   "minimal": false,
+  "animation": true,
   "ignore": ["tmux", "screen", "zellij", "ssh-agent", "gpg-agent", "mosh-server"],
   "stealth": { "interval": "5m", "threshold": 70, "apps": true, "appIdle": "6h", "dryRun": false, "notify": false },
   "runaway": {

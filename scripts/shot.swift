@@ -1,7 +1,10 @@
 // Renders an ANSI terminal capture (tmux capture-pane -e -p) as a PNG of a
 // macOS terminal window. Used to make the README screenshots.
 //
-//   swift scripts/shot.swift capture.ansi out.png "window title"
+//   swift scripts/shot.swift capture.ansi out.png "window title" [cols rows]
+//
+// Pass the terminal's cols and rows to keep blank space a full-screen TUI
+// leaves around its content (e.g. a centered splash).
 import AppKit
 
 let args = CommandLine.arguments
@@ -11,6 +14,8 @@ guard args.count >= 3 else {
 }
 let input = try! String(contentsOfFile: args[1], encoding: .utf8)
 let title = args.count > 3 ? args[3] : "appsassin"
+let termCols = args.count > 5 ? Int(args[4]) ?? 0 : 0
+let termRows = args.count > 5 ? Int(args[5]) ?? 0 : 0
 
 struct RGB { var r, g, b: CGFloat }
 struct Cell { var ch: String; var fg: RGB?; var bg: RGB?; var bold: Bool }
@@ -84,7 +89,12 @@ for line in input.split(separator: "\n", omittingEmptySubsequences: false) {
     flush()
     grid.append(row)
 }
-while let last = grid.last, last.allSatisfy({ $0.ch == " " && $0.bg == nil }) { grid.removeLast() }
+if termRows > 0 {
+    while grid.count > termRows { grid.removeLast() }
+    while grid.count < termRows { grid.append([]) }
+} else {
+    while let last = grid.last, last.allSatisfy({ $0.ch == " " && $0.bg == nil }) { grid.removeLast() }
+}
 
 // Geometry.
 let scale: CGFloat = 2
@@ -93,7 +103,7 @@ let regular = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
 let boldFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .bold)
 let cellW = ("M" as NSString).size(withAttributes: [.font: regular]).width
 let cellH = ceil(fontSize * 1.42)
-let cols = max(grid.map(\.count).max() ?? 80, 40)
+let cols = max(grid.map(\.count).max() ?? 80, 40, termCols)
 let rows = grid.count
 let pad: CGFloat = 18, titleH: CGFloat = 34, margin: CGFloat = 46
 let winW = CGFloat(cols) * cellW + pad * 2

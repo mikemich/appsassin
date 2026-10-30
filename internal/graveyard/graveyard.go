@@ -283,6 +283,9 @@ func command(e Entry, dir string) string {
 		}
 		run = strings.Join(q, " ")
 	}
+	if run == "" {
+		return "" // nothing recorded to re-run; Revive refuses too
+	}
 	if dir != "~" {
 		dir = quote(dir)
 	}

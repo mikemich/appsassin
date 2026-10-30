@@ -14,6 +14,9 @@ import (
 )
 
 func (m *model) View() string {
+	if m.booting {
+		return m.bootView()
+	}
 	if m.mode == modeHelp {
 		return m.helpView()
 	}
@@ -42,7 +45,7 @@ func (m *model) reclaimable() int64 {
 
 func (m *model) stealthTag() string {
 	if m.stealthOn {
-		return sOK.Render("◉ stealth")
+		return sOK.Render("● stealth")
 	}
 	return sDim.Render("○ stealth")
 }
@@ -89,78 +92,69 @@ func ageOf(t *scan.Target, now time.Time) string {
 	return scan.Human(now.Sub(t.Started))
 }
 
+// fill pads the list area so the panel and footer stay at the bottom.
+func fill(b *strings.Builder, lines, h int) {
+	for ; lines < h; lines++ {
+		b.WriteString("\n")
+	}
+}
+
+func (m *model) scanned() string {
+	if m.res == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d procs in %dms", m.res.Scanned, m.res.Took.Milliseconds())
+}
+
+func (m *model) filterNote() string {
+	if m.filter == "" {
+		return ""
+	}
+	return sAccent.Render("filter “"+m.filter+"”") + sDim.Render(" esc clears")
+}
+
 func (m *model) fullView() string {
 	w := max(40, m.width)
 	now := time.Now()
 	var b strings.Builder
 
-	left := sBadge.Render("⚔ APPSASSIN") + "  " + sDim.Render(fmt.Sprintf("%d targets · %s reclaimable", len(m.rows), scan.Bytes(m.reclaimable())))
-	right := m.stealthTag()
-	if m.kills > 0 {
-		right = sAccent.Render(fmt.Sprintf("☠ %d", m.kills)) + sDim.Render(" · ") + right
-	}
-	b.WriteString(spread(left, right, w) + "\n")
-	opts := fmt.Sprintf("threshold ≥%d · sort %s", m.threshold, m.sort)
+	b.WriteString(m.topBar(w) + "\n")
+	thr := fmt.Sprintf("score ≥%d", m.threshold)
 	if m.showAll {
-		opts = "showing everything · sort " + m.sort.String()
+		thr = "every score"
 	}
-	if m.filter != "" {
-		opts += " · filter “" + m.filter + "”"
-	}
-	if m.res != nil {
-		opts += fmt.Sprintf(" · %d procs scanned in %dms", m.res.Scanned, m.res.Took.Milliseconds())
-	}
-	b.WriteString(sFaint.Render(opts) + "\n")
+	b.WriteString(metaLine(sText.Render(scan.Bytes(m.reclaimable()))+sDim.Render(" reclaimable"), thr, "sort "+m.sort.String(), m.filterNote(), m.scanned()) + "\n")
 
-	// Columns: cursor(2) mark(2) score(3) bar(5) name kind(7) mem(6) age(5) why
-	nameW := max(12, min(34, (w-36)*2/5))
-	whyW := max(0, w-36-nameW)
-	b.WriteString(sDim.Render("    "+fitR("SCR", 3)+"       "+fit("TARGET", nameW)+" "+fit("KIND", 7)+" "+fitR("MEM", 6)+" "+fitR("AGE", 5)+"  "+fit("WHY", whyW)) + "\n")
+	// Columns: lead(4) score(3) bar(5) name kind(9) mem(6) age(5) why
+	const fixed = 4 + 3 + 1 + 5 + 1 + 1 + 9 + 1 + 6 + 1 + 5 + 2
+	nameW := max(12, min(34, (w-fixed)*2/5))
+	whyW := max(0, w-fixed-nameW)
+	b.WriteString(colHead("    "+fitR("SCR", 3)+"       "+fit("TARGET", nameW)+" "+fit("KIND", 9)+" "+fitR("MEM", 6)+" "+fitR("AGE", 5)+"  WHY", w) + "\n")
 
 	h := m.listHeight()
 	m.scroll(h)
 	lines := 0
 	if len(m.rows) == 0 {
-		b.WriteString("  " + m.emptyLine() + "\n")
+		b.WriteString("    " + m.emptyLine() + "\n")
 		lines++
 	}
 	for i := m.offset; i < len(m.rows) && lines < h; i++ {
 		t := m.rows[i]
 		sel := i == m.cursor
-		// Every segment carries the highlight itself; wrapping the finished row
-		// would lose the background at each inner reset.
-		on := func(s lipgloss.Style) lipgloss.Style {
-			if sel {
-				return s.Background(rowBg)
-			}
-			return s
-		}
+		on := rowStyle(sel)
 		sp := on(sText).Render(" ")
-		cur, mark := on(sText).Render("  "), on(sFaint).Render("○ ")
-		if sel {
-			cur = on(sAccent).Render("▸ ")
-		}
-		if m.marked[t.PID] {
-			mark = on(sAccent).Render("◉ ")
-		}
 		score := on(lipgloss.NewStyle().Foreground(scoreColor(t.Score)).Bold(true)).Render(fitR(fmt.Sprint(t.Score), 3))
 		name := on(sText).Render(fit(t.Name, nameW))
 		if sel {
 			name = on(sBold).Render(fit(t.Name, nameW))
 		}
-		kind := on(lipgloss.NewStyle().Foreground(kindColor(t.Kind))).Render(fit(string(t.Kind), 7))
-		row := cur + mark + score + sp + bar(t.Score, on) + sp + name + sp + kind + sp +
-			on(sText).Render(fitR(scan.Bytes(t.TreeRSS), 6)) + sp + on(sDim).Render(fitR(ageOf(t, now), 5)) + sp + sp +
-			why(t, whyW, on)
-		if pad := w - lipgloss.Width(row); pad > 0 {
-			row += on(sText).Render(strings.Repeat(" ", pad))
-		}
-		b.WriteString(row + "\n")
+		row := lead(on, sel, markGlyph(on, m.marked[t.PID])) + score + sp + bar(t.Score, on) + sp + name + sp +
+			kindCell(on, t.Kind, 9) + sp + on(sText).Render(fitR(scan.Bytes(t.TreeRSS), 6)) + sp +
+			on(sDim).Render(fitR(ageOf(t, now), 5)) + sp + sp + why(t, whyW, on)
+		b.WriteString(finish(row, w, on) + "\n")
 		lines++
 	}
-	for ; lines < h; lines++ {
-		b.WriteString("\n")
-	}
+	fill(&b, lines, h)
 
 	b.WriteString(m.detail(w, now) + "\n")
 	b.WriteString(m.statusLine(w) + "\n")
@@ -169,58 +163,65 @@ func (m *model) fullView() string {
 }
 
 func (m *model) detail(w int, now time.Time) string {
-	inner := w - 4
-	lines := make([]string, 4)
-	if t := m.current(); t != nil {
-		mem := scan.Bytes(t.RSS)
-		if len(t.Children) > 0 {
-			mem += fmt.Sprintf(" (+%d children, %s total)", len(t.Children), scan.Bytes(t.TreeRSS))
-		}
-		lines[0] = sBold.Render(t.Name) + sDim.Render(fmt.Sprintf("  pid %d · ppid %d · started %s ago · cpu %.1f%% · %s", t.PID, t.PPID, scan.Human(now.Sub(t.Started)), t.CPU, mem))
-		cmd := t.Args
-		if cmd == "" {
-			cmd = t.Comm
-		}
-		lines[1] = sText.Render(fit(cmd, inner))
-		label := "why "
-		if !t.Stray {
-			label = "info "
-		}
-		lines[2] = sDim.Render(label) + sText.Render(fit(strings.Join(t.Reasons, " · "), inner-len(label)))
-		switch t.Kind {
-		case scan.KindMenu:
-			lines[3] = sDim.Render(t.BundleID + " · menu-bar or background app · x asks it to quit")
-		case scan.KindService:
-			lines[3] = sDim.Render("started by launchd — if it's set to keep alive, it will come right back")
-		case scan.KindProc:
-			what := "x sends SIGTERM, then SIGKILL if it ignores that"
-			if n := len(t.Children); n > 0 {
-				what = fmt.Sprintf("x sends SIGTERM to it and its %d child process%s, then SIGKILL if they ignore it", n, map[bool]string{true: "", false: "es"}[n == 1])
-			}
-			lines[3] = sDim.Render(what)
-		case scan.KindApp:
-			used := "last used " + scan.Human(t.Idle(now)) + " ago"
-			if m.res != nil && t.PID == m.res.FrontPID {
-				used = "in front right now"
-			} else if !t.UsedKnown {
-				used = "not seen in front since appsassin started watching"
-			}
-			lines[3] = sDim.Render(fmt.Sprintf("%s · %d windows (%d on screen) · %s", t.BundleID, t.Windows, t.OnScreen, used))
-		case scan.KindHelper:
-			lines[3] = sDim.Render("belongs to " + t.Bundle + ", which is no longer running")
-		default:
-			lines[3] = sDim.Render("parent process is gone; adopted by launchd and nobody is watching it")
-		}
-		if t.Runaway != "" {
-			lines[3] = m.runawayLine(t)
-		}
-	} else {
-		lines[0] = sDim.Render("no target selected")
+	t := m.current()
+	if t == nil {
+		return panel(w, sDim.Render("nothing selected"), "", make([]string, 4))
 	}
-	for i, l := range lines {
-		lines[i] = ansi.Truncate(l, inner, "…")
+	title := sBold.Render(t.Name) + " " + lipgloss.NewStyle().Foreground(kindColor(t.Kind)).Render(string(t.Kind))
+	note := sDim.Render(scan.Bytes(t.TreeRSS) + " · " + scan.Human(now.Sub(t.Started)))
+	if t.Stray && t.Score > 0 {
+		note = lipgloss.NewStyle().Foreground(scoreColor(t.Score)).Bold(true).Render(fmt.Sprintf("score %d", t.Score)) +
+			sDim.Render(" · ") + note
 	}
-	return sBox.Width(w - 2).Render(strings.Join(lines, "\n"))
+
+	cmd := t.Args
+	if cmd == "" {
+		cmd = t.Comm
+	}
+	label := "why"
+	if !t.Stray {
+		label = "info"
+	}
+	proc := fmt.Sprintf("%d · ppid %d · cpu %.1f%% · %s", t.PID, t.PPID, t.CPU, scan.Bytes(t.RSS))
+	if len(t.Children) > 0 {
+		proc += fmt.Sprintf(" + %d child%s (%s total)", len(t.Children), map[bool]string{true: "", false: "ren"}[len(t.Children) == 1], scan.Bytes(t.TreeRSS))
+	}
+
+	var extra string
+	switch t.Kind {
+	case scan.KindMenu:
+		extra = t.BundleID + " · menu-bar or background app · x asks it to quit"
+	case scan.KindService:
+		extra = "started by launchd — if it's set to keep alive, it will come right back"
+	case scan.KindProc:
+		extra = "x sends SIGTERM, then SIGKILL if it ignores that"
+		if n := len(t.Children); n > 0 {
+			extra = fmt.Sprintf("x sends SIGTERM to it and its %d child process%s, then SIGKILL if they ignore it", n, map[bool]string{true: "", false: "es"}[n == 1])
+		}
+	case scan.KindApp:
+		used := "last used " + scan.Human(t.Idle(now)) + " ago"
+		if m.res != nil && t.PID == m.res.FrontPID {
+			used = "in front right now"
+		} else if !t.UsedKnown {
+			used = "not seen in front since appsassin started watching"
+		}
+		extra = fmt.Sprintf("%s · %d windows (%d on screen) · %s", t.BundleID, t.Windows, t.OnScreen, used)
+	case scan.KindHelper:
+		extra = "belongs to " + t.Bundle + ", which is no longer running"
+	default:
+		extra = "parent process is gone; adopted by launchd and nobody is watching it"
+	}
+	noteLine := kv("note", sDim.Render(extra))
+	if t.Runaway != "" {
+		noteLine = kv("alert", m.runawayLine(t))
+	}
+
+	return panel(w, title, note, []string{
+		kv("cmd", sText.Render(cmd)),
+		kv(label, sText.Render(strings.Join(t.Reasons, sDim.Render(" · ")))),
+		kv("pid", sDim.Render(proc)),
+		noteLine,
+	})
 }
 
 // runawayLine says what makes t a runaway and what stealth mode will do about it.
@@ -264,11 +265,11 @@ func (m *model) statusLine(w int) string {
 		if len(m.pending) > 1 {
 			what = fmt.Sprintf("%d targets", len(m.pending))
 		}
-		verb := "Take out"
+		verb := "☠ Take out"
 		if m.force {
-			verb = "FORCE KILL"
+			verb = "☠ FORCE KILL"
 		}
-		return sConfirm.Render(fmt.Sprintf("%s %s (%s)?", verb, what, scan.Bytes(mem))) + sDim.Render("  y / n")
+		return sConfirm.Render(fmt.Sprintf("%s %s (%s)?", verb, what, scan.Bytes(mem))) + "  " + key("y", "yes") + "  " + key("n", "no")
 	case m.mode == modeStealthConfirm:
 		st := m.cfg.Stealth
 		apps := ""
@@ -278,10 +279,10 @@ func (m *model) statusLine(w int) string {
 		if r := m.cfg.Runaway; r.Kill && r.Enabled() {
 			apps += ", and runaways"
 		}
-		return sConfirm.Render("Engage stealth mode?") + sDim.Render(fmt.Sprintf(
-			" y / n · silently kills strays ≥%d every %s%s", st.Threshold, scan.Human(st.IntervalDur()), apps))
+		return sConfirm.Render("Engage stealth mode?") + "  " + key("y", "yes") + "  " + key("n", "no") + sDim.Render(fmt.Sprintf(
+			" · silently kills strays ≥%d every %s%s", st.Threshold, scan.Human(st.IntervalDur()), apps))
 	case m.mode == modeFilter:
-		return sAccent.Render("/ ") + sText.Render(m.filter) + sAccent.Render("█") + sDim.Render("  enter keep · esc clear")
+		return sKeycap.Render("/") + " " + sText.Render(m.filter) + sAccent.Render("▏") + sDim.Render("  enter keeps · esc clears")
 	case m.status != "":
 		st := sOK
 		if m.statusErr {
@@ -289,12 +290,10 @@ func (m *model) statusLine(w int) string {
 		}
 		return st.Render(ansi.Truncate(m.status, w, "…"))
 	case len(m.marked) > 0:
-		return sAccent.Render(fmt.Sprintf("%d marked", len(m.marked))) + sDim.Render(" · x to take them out · esc to clear")
+		return sAccent.Render(fmt.Sprintf("● %d marked", len(m.marked))) + "  " + key("x", "take them out") + "  " + key("esc", "clear")
 	}
 	return ""
 }
-
-func key(k, desc string) string { return sKey.Render(k) + " " + sDim.Render(desc) }
 
 func (m *model) helpLine(w int) string {
 	if m.everything {
@@ -305,8 +304,8 @@ func (m *model) helpLine(w int) string {
 	}
 	return keyLine(w,
 		key("↑↓", "move"), key("space", "mark"), key("x", "kill"), key("K", "force"),
-		key("tab", "everything"), key("/", "filter"), key("s", "sort"), key("i", "spare"), key("m", "minimal"),
-		key("S", "stealth"), key("g", "graveyard"), key("?", "help"), key("q", "quit"),
+		key("tab", "everything"), key("/", "filter"), key("s", "sort"), key("i", "spare"),
+		key("S", "stealth"), key("m", "minimal"), key("g", "graveyard"), key("?", "help"), key("q", "quit"),
 	)
 }
 
@@ -316,7 +315,7 @@ func keyLine(w int, parts ...string) string {
 	for _, p := range parts {
 		next := out
 		if next != "" {
-			next += sFaint.Render("  ")
+			next += "  "
 		}
 		next += p
 		if lipgloss.Width(next) > w {
@@ -330,9 +329,9 @@ func keyLine(w int, parts ...string) string {
 func (m *model) minimalView() string {
 	w := max(30, m.width)
 	var b strings.Builder
-	head := sAccent.Render("appsassin") + sDim.Render(fmt.Sprintf(" %d · %s", len(m.rows), scan.Bytes(m.reclaimable())))
+	head := logo() + sDim.Render(fmt.Sprintf("  %d strays · %s", len(m.rows), scan.Bytes(m.reclaimable())))
 	if m.everything {
-		head = sAccent.Render("appsassin") + sDim.Render(fmt.Sprintf(" running %d · %s", len(m.rows), scan.Bytes(m.reclaimable())))
+		head = logo() + sDim.Render(fmt.Sprintf("  %d running · %s", len(m.rows), scan.Bytes(m.reclaimable())))
 	}
 	b.WriteString(spread(head, m.stealthTag(), w) + "\n")
 
@@ -347,13 +346,13 @@ func (m *model) minimalView() string {
 		t := m.rows[i]
 		cur := " "
 		if i == m.cursor {
-			cur = sAccent.Render("›")
+			cur = sAccent.Render("▌")
 		}
-		mark := "  "
+		mark := sFaint.Render("·") + " "
 		if m.marked[t.PID] {
-			mark = sAccent.Render("◉ ")
+			mark = sAccent.Render("●") + " "
 		}
-		score := lipgloss.NewStyle().Foreground(scoreColor(t.Score)).Render(fitR(fmt.Sprint(t.Score), 2))
+		score := lipgloss.NewStyle().Foreground(scoreColor(t.Score)).Bold(true).Render(fitR(fmt.Sprint(t.Score), 2))
 		why := ""
 		if len(t.Reasons) > 0 {
 			why = t.Reasons[0]
@@ -370,14 +369,16 @@ func (m *model) minimalView() string {
 			why, whyS = t.Runaway, sRunaway
 		}
 		nameW := max(10, min(28, w/3))
-		row := cur + mark + score + " " + sText.Render(fit(t.Name, nameW)) + " " +
+		name := sText.Render(fit(t.Name, nameW))
+		if i == m.cursor {
+			name = sBold.Render(fit(t.Name, nameW))
+		}
+		row := cur + " " + mark + score + " " + name + " " +
 			sText.Render(fitR(scan.Bytes(t.TreeRSS), 6)) + "  " + whyS.Render(why)
 		b.WriteString(ansi.Truncate(row, w, "…") + "\n")
 		lines++
 	}
-	for ; lines < h; lines++ {
-		b.WriteString("\n")
-	}
+	fill(&b, lines, h)
 	if s := m.statusLine(w); s != "" {
 		b.WriteString(s)
 	} else {
@@ -429,49 +430,35 @@ func (m *model) allView() string {
 			procs++
 		}
 	}
-	left := sBadge.Render("⚔ APPSASSIN") + "  " + sAccent.Render("▤ everything running") +
-		sDim.Render(fmt.Sprintf("  %d app%s · %d process%s · %s", apps, plural(apps), procs,
-			map[bool]string{true: "", false: "es"}[procs == 1], scan.Bytes(m.reclaimable())))
-	right := m.stealthTag()
-	if m.kills > 0 {
-		right = sAccent.Render(fmt.Sprintf("☠ %d", m.kills)) + sDim.Render(" · ") + right
-	}
-	b.WriteString(spread(left, right, w) + "\n")
-	opts := "sort " + m.sort.String() + " · / to find anything by name, pid or port · tab back to strays"
+	b.WriteString(m.topBar(w) + "\n")
+	hint := sDim.Render("press ") + sText.Render("/") + sDim.Render(" to find anything by name, pid or :port")
 	if m.filter != "" {
-		opts = "sort " + m.sort.String() + " · filter “" + m.filter + "” · esc clears"
+		hint = m.filterNote()
 	}
-	b.WriteString(sFaint.Render(opts) + "\n")
+	b.WriteString(metaLine(
+		fmt.Sprintf("%d app%s", apps, plural(apps)),
+		fmt.Sprintf("%d process%s", procs, map[bool]string{true: "", false: "es"}[procs == 1]),
+		sText.Render(scan.Bytes(m.reclaimable()))+sDim.Render(" in use"),
+		"sort "+m.sort.String(), hint) + "\n")
 
-	// Columns: cursor(2) mark(2) name kind(8) cpu(5) mem(6) age(5) info
-	nameW := max(14, min(36, (w-34)*2/5))
-	infoW := max(0, w-34-nameW)
-	b.WriteString(sDim.Render("    "+fit("NAME", nameW)+" "+fit("KIND", 8)+" "+fitR("CPU", 5)+" "+fitR("MEM", 6)+" "+fitR("AGE", 5)+"  "+fit("INFO", infoW)) + "\n")
+	// Columns: lead(4) name kind(9) cpu(5) mem(6) age(5) info
+	const fixed = 4 + 1 + 9 + 1 + 5 + 1 + 6 + 1 + 5 + 2
+	nameW := max(14, min(36, (w-fixed)*2/5))
+	infoW := max(0, w-fixed-nameW)
+	b.WriteString(colHead("    "+fit("NAME", nameW)+" "+fit("KIND", 9)+" "+fitR("CPU", 5)+" "+fitR("MEM", 6)+" "+fitR("AGE", 5)+"  INFO", w) + "\n")
 
 	h := m.listHeight()
 	m.scroll(h)
 	lines := 0
 	if len(m.rows) == 0 {
-		b.WriteString("  " + m.emptyLine() + "\n")
+		b.WriteString("    " + m.emptyLine() + "\n")
 		lines++
 	}
 	for i := m.offset; i < len(m.rows) && lines < h; i++ {
 		t := m.rows[i]
 		sel := i == m.cursor
-		on := func(s lipgloss.Style) lipgloss.Style {
-			if sel {
-				return s.Background(rowBg)
-			}
-			return s
-		}
+		on := rowStyle(sel)
 		sp := on(sText).Render(" ")
-		cur, mark := on(sText).Render("  "), on(sFaint).Render("○ ")
-		if sel {
-			cur = on(sAccent).Render("▸ ")
-		}
-		if m.marked[t.PID] {
-			mark = on(sAccent).Render("◉ ")
-		}
 		name := on(sText).Render(fit(t.Name, nameW))
 		if sel {
 			name = on(sBold).Render(fit(t.Name, nameW))
@@ -484,20 +471,15 @@ func (m *model) allView() string {
 		if t.Stray && t.Score >= m.threshold {
 			tag := fmt.Sprintf("stray %d · ", t.Score)
 			tw := ansi.StringWidth(tag)
-			info = on(lipgloss.NewStyle().Foreground(scoreColor(t.Score))).Render(fit(tag, min(tw, infoW))) +
+			info = on(lipgloss.NewStyle().Foreground(scoreColor(t.Score)).Bold(true)).Render(fit(tag, min(tw, infoW))) +
 				why(t, max(0, infoW-tw), on)
 		}
-		row := cur + mark + name + sp + on(lipgloss.NewStyle().Foreground(kindColor(t.Kind))).Render(fit(string(t.Kind), 8)) + sp +
+		row := lead(on, sel, markGlyph(on, m.marked[t.PID])) + name + sp + kindCell(on, t.Kind, 9) + sp +
 			cpu + sp + on(sText).Render(fitR(scan.Bytes(t.TreeRSS), 6)) + sp + on(sDim).Render(fitR(ageOf(t, now), 5)) + sp + sp + info
-		if pad := w - lipgloss.Width(row); pad > 0 {
-			row += on(sText).Render(strings.Repeat(" ", pad))
-		}
-		b.WriteString(row + "\n")
+		b.WriteString(finish(row, w, on) + "\n")
 		lines++
 	}
-	for ; lines < h; lines++ {
-		b.WriteString("\n")
-	}
+	fill(&b, lines, h)
 
 	b.WriteString(m.detail(w, now) + "\n")
 	b.WriteString(m.statusLine(w) + "\n")
@@ -506,37 +488,58 @@ func (m *model) allView() string {
 }
 
 func (m *model) helpView() string {
-	rows := [][2]string{
-		{"↑↓ / j k", "move"},
-		{"home / G", "top / bottom"},
-		{"space", "mark target"},
-		{"a", "mark all / none"},
-		{"x", "take out marked (or current) — apps are asked to quit politely"},
-		{"K", "force kill (SIGKILL, no save prompts)"},
-		{"i", "spare: add current target to the ignore list forever"},
-		{"tab", "switch between strays and everything running"},
-		{"/", "find (by name, pid, port, path…)"},
-		{"s", "cycle sort: score → memory → age → name → cpu"},
-		{"+ / -", "raise / lower score threshold"},
-		{"A", "show everything with any stray score"},
-		{"m", "toggle minimal mode"},
-		{"S", "toggle stealth mode (silent background sweeper)"},
-		{"g", "graveyard: every kill, newest first · r revives the selected one"},
-		{"r", "rescan now (revive, in the graveyard)"},
-		{"esc", "clear marks and filter"},
-		{"q", "quit"},
+	sections := []struct {
+		title string
+		rows  [][2]string
+	}{
+		{"move & mark", [][2]string{
+			{"↑↓  j k", "move"},
+			{"home  G", "top / bottom"},
+			{"space", "mark target"},
+			{"a", "mark all / none"},
+			{"esc", "clear marks and filter"},
+		}},
+		{"take out", [][2]string{
+			{"x", "take out marked (or current) — apps are asked to quit politely"},
+			{"K", "force kill (SIGKILL, no save prompts)"},
+			{"i", "spare: add current target to the ignore list forever"},
+			{"g", "graveyard: every kill, newest first · r revives the selected one"},
+		}},
+		{"look around", [][2]string{
+			{"tab", "switch between strays and everything running"},
+			{"/", "find (by name, pid, port, path…)"},
+			{"s", "cycle sort: score → memory → age → name → cpu"},
+			{"+  -", "raise / lower score threshold"},
+			{"A", "show everything with any stray score"},
+			{"m", "toggle minimal mode"},
+			{"S", "toggle stealth mode (silent background sweeper)"},
+			{"r", "rescan now"},
+			{"q", "quit"},
+		}},
 	}
-	var b strings.Builder
-	b.WriteString(sBadge.Render("⚔ APPSASSIN") + sDim.Render("  keys") + "\n\n")
-	for _, r := range rows {
-		b.WriteString("  " + sKey.Render(fit(r[0], 12)) + sDim.Render(r[1]) + "\n")
+	lines := []string{logo() + sDim.Render("  keys")}
+	for _, s := range sections {
+		lines = append(lines, "", sAccent.Render("  "+s.title))
+		for _, r := range s.rows {
+			var caps []string
+			for _, k := range strings.Fields(r[0]) {
+				caps = append(caps, sKeycap.Render(k))
+			}
+			c := strings.Join(caps, " ")
+			lines = append(lines, "    "+c+strings.Repeat(" ", max(1, 14-lipgloss.Width(c)))+sDim.Render(r[1]))
+		}
 	}
-	b.WriteString("\n" + sDim.Render("  Scores: orphaned processes, helpers that outlived their app, and windowless") + "\n")
-	b.WriteString(sDim.Render("  apps nobody has touched rank highest. Busy processes rank lower, unless") + "\n")
-	b.WriteString(sDim.Render("  they're runaways: "+m.cfg.Runaway.Describe()+". Those are listed even") + "\n")
-	b.WriteString(sDim.Render("  when their parent is alive, and stealth mode kills them only with runaway.kill on.") + "\n\n")
-	b.WriteString(sFaint.Render("  any key to return"))
-	return b.String()
+	about := []string{
+		"",
+		sDim.Render("  Orphaned processes, helpers that outlived their app, and windowless apps nobody"),
+		sDim.Render("  has touched score highest. Busy processes score lower, unless they're runaways:"),
+		sDim.Render("  " + m.cfg.Runaway.Describe() + "."),
+	}
+	if len(lines)+len(about)+2 <= m.height {
+		lines = append(lines, about...) // only when it fits; the keys matter more
+	}
+	lines = append(lines, "", sFaint.Render("  any key to return"))
+	return strings.Join(lines, "\n")
 }
 
 func killedAgo(e graveyard.Entry, now time.Time) string {
@@ -565,63 +568,49 @@ func (m *model) graveView() string {
 	now := time.Now()
 	var b strings.Builder
 
-	left := sBadge.Render("⚔ APPSASSIN") + "  " + sAccent.Render("☠ graveyard") +
-		sDim.Render(fmt.Sprintf("  %d kill%s · %d revived", len(m.graves), plural(len(m.graves)), m.revivedCount()))
-	b.WriteString(spread(left, m.stealthTag(), w) + "\n")
-	sub := "newest first · r brings the selected one back · "
-	if m.demo {
-		sub += "demo graveyard"
-	} else {
-		sub += strings.Replace(graveyard.Path(), home(), "~", 1)
+	b.WriteString(m.topBar(w) + "\n")
+	where := "demo graveyard"
+	if !m.demo {
+		where = strings.Replace(graveyard.Path(), home(), "~", 1)
 	}
-	b.WriteString(sFaint.Render(sub) + "\n")
+	b.WriteString(metaLine(
+		fmt.Sprintf("%d kill%s", len(m.graves), plural(len(m.graves))),
+		sOK.Render(fmt.Sprintf("%d revived", m.revivedCount())),
+		"newest first", sText.Render("r")+sDim.Render(" brings one back"), sFaint.Render(where)) + "\n")
 
-	// Columns: cursor(2) mark(2) killed(8) name kind(7) by(7) mem(6) command
-	nameW := max(12, min(30, (w-38)*2/5))
-	cmdW := max(0, w-38-nameW)
-	b.WriteString(sDim.Render("    "+fit("KILLED", 8)+" "+fit("TARGET", nameW)+" "+fit("KIND", 7)+" "+fit("BY", 7)+" "+fitR("MEM", 6)+"  "+fit("COMMAND", cmdW)) + "\n")
+	// Columns: lead(4) killed(8) name kind(9) by(7) mem(6) command
+	const fixed = 4 + 8 + 1 + 1 + 9 + 1 + 7 + 1 + 6 + 2
+	nameW := max(12, min(30, (w-fixed)*2/5))
+	cmdW := max(0, w-fixed-nameW)
+	b.WriteString(colHead("    "+fit("KILLED", 8)+" "+fit("TARGET", nameW)+" "+fit("KIND", 9)+" "+fit("BY", 7)+" "+fitR("MEM", 6)+"  COMMAND", w) + "\n")
 
 	h := m.listHeight()
 	m.goffset = scrollTo(m.gcursor, m.goffset, len(m.graves), h)
 	lines := 0
 	if len(m.graves) == 0 {
-		b.WriteString("  " + m.graveEmpty() + "\n")
+		b.WriteString("    " + m.graveEmpty() + "\n")
 		lines++
 	}
 	for i := m.goffset; i < len(m.graves) && lines < h; i++ {
 		e := m.graves[i]
 		sel := i == m.gcursor
-		on := func(s lipgloss.Style) lipgloss.Style {
-			if sel {
-				return s.Background(rowBg)
-			}
-			return s
-		}
+		on := rowStyle(sel)
 		sp := on(sText).Render(" ")
-		cur, mark := on(sText).Render("  "), on(sFaint).Render("☠ ")
-		if sel {
-			cur = on(sAccent).Render("▸ ")
-		}
+		mark := on(sFaint).Render("☠")
 		if e.Revived != nil {
-			mark = on(sOK).Render("↺ ")
+			mark = on(sOK).Render("↺")
 		}
 		name := on(sText).Render(fit(e.Name, nameW))
 		if sel {
 			name = on(sBold).Render(fit(e.Name, nameW))
 		}
-		row := cur + mark + on(sDim).Render(fit(killedAgo(e, now), 8)) + sp + name + sp +
-			on(lipgloss.NewStyle().Foreground(kindColor(e.Kind))).Render(fit(string(e.Kind), 7)) + sp +
-			on(sDim).Render(fit(e.By, 7)) + sp + on(sText).Render(fitR(scan.Bytes(e.Mem), 6)) + sp + sp +
+		row := lead(on, sel, mark) + on(sDim).Render(fit(killedAgo(e, now), 8)) + sp + name + sp +
+			kindCell(on, e.Kind, 9) + sp + on(sDim).Render(fit(e.By, 7)) + sp + on(sText).Render(fitR(scan.Bytes(e.Mem), 6)) + sp + sp +
 			on(sDim).Render(fit(e.What(), cmdW))
-		if pad := w - lipgloss.Width(row); pad > 0 {
-			row += on(sText).Render(strings.Repeat(" ", pad))
-		}
-		b.WriteString(row + "\n")
+		b.WriteString(finish(row, w, on) + "\n")
 		lines++
 	}
-	for ; lines < h; lines++ {
-		b.WriteString("\n")
-	}
+	fill(&b, lines, h)
 
 	b.WriteString(m.graveDetail(w, now) + "\n")
 	b.WriteString(m.statusLine(w) + "\n")
@@ -630,56 +619,56 @@ func (m *model) graveView() string {
 }
 
 func (m *model) graveDetail(w int, now time.Time) string {
-	inner := w - 4
-	lines := make([]string, 4)
-	if e := m.currentGrave(); e != nil {
-		lines[0] = sBold.Render(e.Name) + sDim.Render(fmt.Sprintf("  pid %d · killed %s by %s · score %d · %s",
-			e.PID, killedAgo(*e, now), e.By, e.Score, scan.Bytes(e.Mem)))
-		if e.Kind.IsApp() {
-			lines[1] = sText.Render(fit(e.Bundle, inner))
-			lines[2] = sDim.Render(e.BundleID + " · why " + strings.Join(e.Reasons, " · "))
-		} else {
-			cmd := e.Args
-			if cmd == "" {
-				cmd = e.Comm
-			}
-			lines[1] = sText.Render(fit(cmd, inner))
-			where := "in " + e.Cwd
-			if e.Cwd == "" {
-				where = "working directory unknown"
-			}
-			if len(e.Ports) > 0 {
-				ps := make([]string, len(e.Ports))
-				for i, p := range e.Ports {
-					ps[i] = fmt.Sprintf(":%d", p)
-				}
-				where += " · was listening " + strings.Join(ps, " ")
-			}
-			lines[2] = sDim.Render(where)
-		}
-		run := sDim.Render("r runs ") + sText.Render(graveyard.Command(*e))
-		if e.Revived != nil {
-			back := "↺ revived " + scan.Human(now.Sub(*e.Revived)) + " ago"
-			if e.RevivedPID > 0 {
-				back += fmt.Sprintf(" (pid %d)", e.RevivedPID)
-			}
-			run = sOK.Render(back) + sDim.Render(" · r again runs ") + sText.Render(graveyard.Command(*e))
-		}
-		lines[3] = run
+	e := m.currentGrave()
+	if e == nil {
+		return panel(w, sDim.Render("nothing selected"), "", make([]string, 4))
+	}
+	title := sBold.Render(e.Name) + " " + lipgloss.NewStyle().Foreground(kindColor(e.Kind)).Render(string(e.Kind))
+	note := sDim.Render(fmt.Sprintf("killed %s by %s · %s", killedAgo(*e, now), e.By, scan.Bytes(e.Mem)))
+
+	var l1, l2 string
+	if e.Kind.IsApp() {
+		l1 = kv("app", sText.Render(e.Bundle))
+		l2 = kv("id", sDim.Render(e.BundleID))
 	} else {
-		lines[0] = sDim.Render("nothing selected")
+		cmd := e.Args
+		if cmd == "" {
+			cmd = e.Comm
+		}
+		l1 = kv("cmd", sText.Render(cmd))
+		where := e.Cwd
+		if where == "" {
+			where = "working directory unknown"
+		}
+		if len(e.Ports) > 0 {
+			ps := make([]string, len(e.Ports))
+			for i, p := range e.Ports {
+				ps[i] = fmt.Sprintf(":%d", p)
+			}
+			where += " · was listening " + strings.Join(ps, " ")
+		}
+		l2 = kv("dir", sDim.Render(where))
 	}
-	for i, l := range lines {
-		lines[i] = ansi.Truncate(l, inner, "…")
+	why := fmt.Sprintf("score %d · %s", e.Score, strings.Join(e.Reasons, " · "))
+	run := sDim.Render("r runs ") + sText.Render(graveyard.Command(*e))
+	if graveyard.Command(*e) == "" {
+		run = sDim.Render("can't be revived: no command line was recorded")
 	}
-	return sBox.Width(w - 2).Render(strings.Join(lines, "\n"))
+	if e.Revived != nil {
+		back := "↺ revived " + scan.Human(now.Sub(*e.Revived)) + " ago"
+		if e.RevivedPID > 0 {
+			back += fmt.Sprintf(" (pid %d)", e.RevivedPID)
+		}
+		run = sOK.Render(back) + sDim.Render(" · r again runs ") + sText.Render(graveyard.Command(*e))
+	}
+	return panel(w, title, note, []string{l1, l2, kv("why", sDim.Render(why)), kv("undo", run)})
 }
 
 func (m *model) minimalGraveView() string {
 	w := max(30, m.width)
 	now := time.Now()
 	var b strings.Builder
-	head := sAccent.Render("appsassin") + sDim.Render(fmt.Sprintf(" graveyard · %d", len(m.graves)))
+	head := logo() + sDim.Render(fmt.Sprintf("  graveyard · %d", len(m.graves)))
 	b.WriteString(spread(head, m.stealthTag(), w) + "\n")
 
 	h := m.listHeight()
@@ -693,21 +682,19 @@ func (m *model) minimalGraveView() string {
 		e := m.graves[i]
 		cur := " "
 		if i == m.gcursor {
-			cur = sAccent.Render("›")
+			cur = sAccent.Render("▌")
 		}
-		mark := "  "
+		mark := sFaint.Render("☠") + " "
 		if e.Revived != nil {
-			mark = sOK.Render("↺ ")
+			mark = sOK.Render("↺") + " "
 		}
 		nameW := max(10, min(28, w/3))
-		row := cur + mark + sDim.Render(fitR(scan.Human(now.Sub(e.Killed)), 4)) + " " + sText.Render(fit(e.Name, nameW)) + " " +
-			lipgloss.NewStyle().Foreground(kindColor(e.Kind)).Render(fit(string(e.Kind), 6)) + " " + sDim.Render(e.By)
+		row := cur + " " + mark + sDim.Render(fitR(scan.Human(now.Sub(e.Killed)), 4)) + " " + sText.Render(fit(e.Name, nameW)) + " " +
+			lipgloss.NewStyle().Foreground(kindColor(e.Kind)).Render(fit(string(e.Kind), 7)) + " " + sDim.Render(e.By)
 		b.WriteString(ansi.Truncate(row, w, "…") + "\n")
 		lines++
 	}
-	for ; lines < h; lines++ {
-		b.WriteString("\n")
-	}
+	fill(&b, lines, h)
 	if s := m.statusLine(w); s != "" {
 		b.WriteString(s)
 	} else {

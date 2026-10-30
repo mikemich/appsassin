@@ -109,6 +109,9 @@ type model struct {
 	goffset   int
 	graveErr  error
 
+	booting   bool // playing the boot animation
+	bootStart time.Time
+
 	demo bool         // fake data, simulated kills — for screenshots & try-outs
 	gone map[int]bool // demo targets already "killed"
 
@@ -116,7 +119,7 @@ type model struct {
 }
 
 // Run starts the TUI.
-func Run(cfg config.Config, minimal, demo, everything bool) error {
+func Run(cfg config.Config, minimal, demo, everything, anim bool) error {
 	m := &model{
 		cfg:       cfg,
 		tracker:   scan.LoadTracker(),
@@ -131,6 +134,7 @@ func Run(cfg config.Config, minimal, demo, everything bool) error {
 	if everything {
 		m.everything, m.sort = true, sortMem
 	}
+	m.booting = anim && cfg.Animation && !m.minimal
 	if demo {
 		m.threshold = 30
 		m.graves = graveyard.Demo(time.Now())
@@ -148,6 +152,10 @@ func Run(cfg config.Config, minimal, demo, everything bool) error {
 
 func (m *model) Init() tea.Cmd {
 	m.scanning = true
+	if m.booting {
+		m.bootStart = time.Now()
+		return tea.Batch(m.scanCmd(), tick(), bootTick())
+	}
 	return tea.Batch(m.scanCmd(), tick())
 }
 
@@ -334,7 +342,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.booting && !m.bootFits() {
+			m.booting = false
+		}
 		return m, nil
+
+	case bootTickMsg:
+		if !m.booting {
+			return m, nil
+		}
+		if m.bootDone(time.Time(msg)) {
+			m.booting = false
+			return m, nil
+		}
+		return m, bootTick()
 
 	case tickMsg:
 		cmds := []tea.Cmd{tick()}
@@ -442,6 +463,10 @@ func (m *model) move(d int) {
 func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if m.booting {
+		m.booting = false // any key skips the animation
+		return m, nil
 	}
 
 	switch m.mode {

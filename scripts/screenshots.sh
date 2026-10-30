@@ -10,13 +10,14 @@ trap 'tmux kill-session -t shot 2>/dev/null || true; rm -rf "$tmp"' EXIT
 frame=0
 
 start() { # cols rows args...
+  COLS=$1 ROWS=$2
   tmux kill-session -t shot 2>/dev/null || true
   tmux new-session -d -s shot -x "$1" -y "$2" -e COLORTERM=truecolor -e TERM=xterm-256color "./appsassin ${*:3}"
-  sleep 1.2
+  sleep "${WAIT:-1.2}"
 }
 keys() { tmux send-keys -t shot "$@"; sleep "${PAUSE:-0.35}"; }
-grab() { tmux capture-pane -t shot -e -p >"$tmp/$1.ansi"; }
-render() { swift scripts/shot.swift "$tmp/$1.ansi" "$2" "appsassin — zsh"; }
+grab() { tmux capture-pane -t shot -e -N -p >"$tmp/$1.ansi"; }
+render() { swift scripts/shot.swift "$tmp/$1.ansi" "$2" "appsassin — zsh" "$COLS" "$ROWS"; }
 gif() { # hold-seconds
   frame=$((frame + 1))
   grab "f$frame"
@@ -25,8 +26,19 @@ gif() { # hold-seconds
   echo "duration $1" >>"$tmp/frames.txt"
 }
 
+# Boot animation: grab it fast while it plays, render afterwards.
+WAIT=0.08 start 118 30 --demo
+for i in $(seq -w 1 12); do grab "boot$i"; sleep 0.05; done
+for i in $(seq -w 1 12); do render "boot$i" "$tmp/b$i.png" & done
+wait
+for i in $(seq -w 1 12); do
+  echo "file '$tmp/b$i.png'" >>"$tmp/frames.txt"
+  echo "duration 0.06" >>"$tmp/frames.txt"
+done
+cp "$tmp/b08.png" docs/boot.png
+sleep 1
+
 # Full mode: mark three dev servers, land on an app to show its details.
-start 118 30 --demo
 gif 1.6
 keys Space; gif 0.5
 keys Down; gif 0.5
